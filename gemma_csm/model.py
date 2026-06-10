@@ -84,6 +84,11 @@ class GemmaCSM(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.backbone = backbone
+        # Gemma 4 PLE: passing inputs_embeds without input_ids triggers a
+        # vocab-sized reverse lookup (OOM, and audio embeds aren't in vocab).
+        # We must compute per_layer_inputs ourselves: real lookup for text
+        # positions, zeros for audio frames.
+        self.uses_ple = hasattr(backbone, "get_per_layer_inputs")
         d_model = backbone.config.hidden_size
         self.audio_embs = nn.ModuleList(
             [nn.Embedding(cfg.codebook_size, d_model) for _ in range(cfg.n_codebooks)]
@@ -101,6 +106,15 @@ class GemmaCSM(nn.Module):
     def _embed_text(self, text_ids):
         return self.backbone.get_input_embeddings()(text_ids)
 
+    def _backbone_kwargs(self, text_ids, n_audio_frames):
+        if not self.uses_ple:
+            return {}
+        ple = self.backbone.get_per_layer_inputs(text_ids, None)  # (B, Tt, L, D)
+        if n_audio_frames:
+            pad = ple.new_zeros(ple.shape[0], n_audio_frames, *ple.shape[2:])
+            ple = torch.cat([ple, pad], dim=1)
+        return {"per_layer_inputs": ple}
+
     # -- training forward ------------------------------------------------------
     def forward(self, batch):
         text_e = self._embed_text(batch["text_ids"])             # (B, Tt, d)
@@ -108,7 +122,8 @@ class GemmaCSM(nn.Module):
         x = torch.cat([text_e, audio_e], dim=1)
         attn = torch.cat([batch["text_mask"], batch["frame_mask"]], dim=1).long()
         h = self.backbone(
-            inputs_embeds=x, attention_mask=attn, output_hidden_states=True
+            inputs_embeds=x, attention_mask=attn, output_hidden_states=True,
+            **self._backbone_kwargs(batch["text_ids"], batch["codes"].shape[2]),
         ).hidden_states[-1]
 
         B, Tt = batch["text_ids"].shape
@@ -150,7 +165,8 @@ class GemmaCSM(nn.Module):
         frames = []
         for _ in range(max_frames):
             h = self.backbone(
-                inputs_embeds=x, output_hidden_states=True
+                inputs_embeds=x, output_hidden_states=True,
+                **self._backbone_kwargs(text_ids, len(frames)),
             ).hidden_states[-1][:, -1]                            # (1, d)
             logits = self.c0_head(h).float() / temperature
             c0 = torch.multinomial(F.softmax(logits, -1), 1)[:, 0]
