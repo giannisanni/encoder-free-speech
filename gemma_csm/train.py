@@ -44,24 +44,53 @@ def trainable_state_dict(model):
             if "lora" in k or not k.startswith("backbone.")}
 
 
+def make_optimizer(model, lr: float, depth_lr_mult: float = 1.0):
+    """AdamW with the depth decoder in its own (optionally hotter) param group.
+
+    PersonaPlex trains its depth transformer at 2x the temporal transformer's
+    LR; from-scratch depth params can absorb a hotter rate than LoRA adapters.
+    """
+    depth, rest = [], []
+    for name, p in model.named_parameters():
+        if not p.requires_grad:
+            continue
+        (depth if name.startswith("depth.") else rest).append(p)
+    return torch.optim.AdamW([
+        {"params": rest, "lr": lr},
+        {"params": depth, "lr": lr * depth_lr_mult},
+    ])
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--shard", type=Path, required=True)
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--out", type=Path, default=Path("checkpoints/run"))
     p.add_argument("--eval-every", type=int, default=500)
+    p.add_argument("--resume", type=Path, default=None,
+                   help="checkpoint of trainable weights to resume from")
+    p.add_argument("--depth-frac", type=float, default=None,
+                   help="override cfg.depth_loss_frame_frac (e.g. 0.25)")
+    p.add_argument("--depth-lr-mult", type=float, default=1.0,
+                   help="depth decoder LR multiplier (PersonaPlex used 2x)")
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
 
     cfg = GemmaCSMConfig()
+    if a.depth_frac is not None:
+        cfg.depth_loss_frame_frac = a.depth_frac
     model, tok = load_gemma_csm(cfg)
+    if a.resume:
+        sd = torch.load(a.resume, weights_only=True, map_location="cuda")
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        assert not unexpected, f"unexpected keys: {unexpected[:5]}"
+        print(f"resumed trainables from {a.resume}", flush=True)
     codec = MimiCodec(device="cpu")  # decode for eval on CPU, keep VRAM clean
     ds = CodesDataset([a.shard], tok, max_frames=cfg.max_frames)
     print(f"dataset: {len(ds)} clips")
     dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True,
                     collate_fn=lambda b: collate(b, tok.pad_token_id or 0))
-    opt = torch.optim.AdamW(
-        (q for q in model.parameters() if q.requires_grad), lr=cfg.lr)
+    opt = make_optimizer(model, cfg.lr, a.depth_lr_mult)
 
     step, t0 = 0, time.time()
     while step < a.steps:
