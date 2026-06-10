@@ -104,6 +104,22 @@ text (+ later: audio/video context)
 | MisoTTS | Modified MIT (attribution above 50M MAU / $10M-mo — n/a) | Second reference implementation of the same architecture |
 | We write | — | Gemma<->audio-head glue, dataset/collator, training loop, eval scripts |
 
+## M0a result (2026-06-10) — GATE PASSED
+
+50-clip overfit run, 6000 steps, ~0.45-0.67 s/step on the 4060 Ti (QLoRA peak
+7.9 GB). Final losses ~0.00 (c0) / ~0.02 (depth). At step 4000 the
+memorization probe renders the full first clause ("Printing, in the only
+sense with which we are at present concerned") clearly intelligible in the
+LJSpeech voice, then degrades — classic exposure-bias drift after ~50
+frames. Verdict: architecture validated end-to-end; drift to be addressed
+via cooler sampling (temp/top-k) and, primarily, M0b's full-data training.
+
+Two wiring bugs found and fixed via the gate, both with CPU regression tests:
+1. Depth decoder trained on the hidden AT frame t (answer leaked via the
+   frame's own input embedding); inference uses the pre-frame hidden.
+2. Right-padded text put padding between text and audio, shifting audio
+   positions per batch pairing; now packs [text][audio] contiguously.
+
 ## Key risks
 
 1. **Transfer risk (the bet itself):** Gemma representations may transfer
