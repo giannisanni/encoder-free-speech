@@ -155,13 +155,16 @@ def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
                     split: str = "train.clean.360"):
     """Stream LibriTTS-R from HuggingFace (mythicinfinity/libritts_r) and
     Mimi-encode on the fly — no archive download, no extraction."""
-    from datasets import load_dataset
+    from datasets import Audio, load_dataset
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     codec = MimiCodec(device=device)
     ds = load_dataset("mythicinfinity/libritts_r", "clean", split=split,
                       streaming=True)
+    # decode=False: skip datasets' torchcodec audio decoding (segfaults
+    # without FFmpeg/torchcodec); we decode the flac/wav bytes via soundfile
+    ds = ds.cast_column("audio", Audio(decode=False))
     items, n_shard, n_done, n_skipped = [], 0, 0, 0
 
     def flush():
@@ -175,8 +178,7 @@ def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
     for ex in tqdm(ds, desc="encoding", unit="utt"):
         if limit and n_done >= limit:
             break
-        audio = ex["audio"]
-        data, sr = audio["array"], audio["sampling_rate"]
+        data, sr = sf.read(io.BytesIO(ex["audio"]["bytes"]), dtype="float32")
         if sr != 24_000 or len(data) > max_seconds * sr:
             n_skipped += 1
             continue
