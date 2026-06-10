@@ -117,48 +117,74 @@ class GemmaCSM(nn.Module):
 
     # -- training forward ------------------------------------------------------
     def forward(self, batch):
+        """Packs each item contiguously as [text][audio frames] with ALL
+        padding at the tail. Padding between text and audio would shift the
+        audio positions of short-text items relative to inference (which has
+        no padding), corrupting what the model learns about position geometry.
+        """
         text_e = self._embed_text(batch["text_ids"])             # (B, Tt, d)
         audio_e = self._embed_frames(batch["codes"])             # (B, Tf, d)
-        x = torch.cat([text_e, audio_e], dim=1)
-        attn = torch.cat([batch["text_mask"], batch["frame_mask"]], dim=1).long()
-        h = self.backbone(
-            inputs_embeds=x, attention_mask=attn, output_hidden_states=True,
-            **self._backbone_kwargs(batch["text_ids"], batch["codes"].shape[2]),
-        ).hidden_states[-1]
-
         B, Tt = batch["text_ids"].shape
         Tf = batch["codes"].shape[2]
-        # positions predicting frame t's c0: last-text (t=0) .. frame Tf-2
-        pred_h = h[:, Tt - 1 : Tt + Tf - 1]                      # (B, Tf, d)
+        L = batch["text_mask"].sum(1)                            # text lens
+        Fr = batch["frame_mask"].sum(1) - 1                      # real frame counts
 
-        # c0 targets: real c0 at content frames, EOS class at the EOS slot
-        c0_tgt = batch["codes"][:, 0].clone()                    # (B, Tf)
-        eos_pos = batch["frame_mask"].sum(1) - 1                 # index of EOS slot
-        c0_tgt[torch.arange(B), eos_pos] = self.cfg.c0_eos_id
+        x = text_e.new_zeros(B, Tt + Tf, text_e.shape[-1])
+        attn = torch.zeros(B, Tt + Tf, dtype=torch.long, device=x.device)
+        ple = None
+        if self.uses_ple:
+            ple_text = self.backbone.get_per_layer_inputs(batch["text_ids"], None)
+            ple = ple_text.new_zeros(B, Tt + Tf, *ple_text.shape[2:])
+        for i in range(B):
+            li, fi = int(L[i]), int(Fr[i])
+            x[i, :li] = text_e[i, :li]
+            x[i, li : li + fi] = audio_e[i, :fi]
+            attn[i, : li + fi] = 1
+            if ple is not None:
+                ple[i, :li] = ple_text[i, :li]
+        kwargs = {"per_layer_inputs": ple} if ple is not None else {}
+        h = self.backbone(
+            inputs_embeds=x, attention_mask=attn, output_hidden_states=True,
+            **kwargs,
+        ).hidden_states[-1]
+
+        # c0: for item i, frame t (0..Fr_i incl. EOS) is predicted from
+        # position L_i - 1 + t — identical to inference geometry.
+        pred_hs, c0_tgts, depth_hs, depth_codes = [], [], [], []
+        c0_logits_padded = h.new_zeros(B, Tf, self.cfg.codebook_size + 1)
+        for i in range(B):
+            li, fi = int(L[i]), int(Fr[i])
+            pos = torch.arange(li - 1, li + fi, device=h.device)
+            pred_hs.append(h[i, pos])                            # (fi+1, d)
+            tgt = torch.cat([
+                batch["codes"][i, 0, :fi],
+                batch["codes"].new_tensor([self.cfg.c0_eos_id]),
+            ])
+            c0_tgts.append(tgt)
+            depth_hs.append(h[i, pos[:-1]])                      # pre-frame hiddens
+            depth_codes.append(batch["codes"][i, :, :fi].T)      # (fi, 32)
+        pred_h = torch.cat(pred_hs)
         logits = self.c0_head(pred_h)
-        loss_c0 = F.cross_entropy(
-            logits[batch["frame_mask"]].float(), c0_tgt[batch["frame_mask"]]
-        )
+        loss_c0 = F.cross_entropy(logits.float(), torch.cat(c0_tgts))
+        off = 0
+        for i in range(B):
+            n = int(Fr[i]) + 1
+            c0_logits_padded[i, :n] = logits[off : off + n]
+            off += n
 
-        # depth loss on a random fraction of REAL frames (not the EOS slot)
-        real = batch["frame_mask"].clone()
-        real[torch.arange(B), eos_pos] = False
-        idx_b, idx_t = real.nonzero(as_tuple=True)
-        if len(idx_b) == 0:
+        # depth loss on a random fraction of frames, conditioned on the
+        # pre-frame hidden (no leakage, matches inference)
+        all_h = torch.cat(depth_hs)
+        all_codes = torch.cat(depth_codes)
+        if len(all_h) == 0:
             loss_depth = loss_c0.new_zeros(())
         else:
-            n_keep = max(1, int(len(idx_b) * self.cfg.depth_loss_frame_frac))
-            sel = torch.randperm(len(idx_b))[:n_keep]
-            ib, it = idx_b[sel], idx_t[sel]
-            # condition on the hidden BEFORE frame t (same position that
-            # predicts its c0) — matching inference, where frame t does not
-            # exist yet. Conditioning on h AT frame t leaks the answer.
-            frame_h = h[ib, Tt + it - 1]
-            frame_codes = batch["codes"][ib, :, it]               # (n, 32)
-            loss_depth = self.depth.loss(frame_h, frame_codes)
+            n_keep = max(1, int(len(all_h) * self.cfg.depth_loss_frame_frac))
+            sel = torch.randperm(len(all_h))[:n_keep]
+            loss_depth = self.depth.loss(all_h[sel], all_codes[sel])
 
         return {"loss_c0": loss_c0, "loss_depth": loss_depth,
-                "loss": loss_c0 + loss_depth}
+                "loss": loss_c0 + loss_depth, "c0_logits": c0_logits_padded}
 
     # -- inference ---------------------------------------------------------------
     @torch.no_grad()
