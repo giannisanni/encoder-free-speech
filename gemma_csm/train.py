@@ -63,7 +63,8 @@ def make_optimizer(model, lr: float, depth_lr_mult: float = 1.0):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--shard", type=Path, required=True)
+    p.add_argument("--shard", type=Path, required=True, nargs="+",
+                   help="one or more .pt shards (shell glob ok)")
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--out", type=Path, default=Path("checkpoints/run"))
     p.add_argument("--eval-every", type=int, default=500)
@@ -86,7 +87,7 @@ def main():
         assert not unexpected, f"unexpected keys: {unexpected[:5]}"
         print(f"resumed trainables from {a.resume}", flush=True)
     codec = MimiCodec(device="cpu")  # decode for eval on CPU, keep VRAM clean
-    ds = CodesDataset([a.shard], tok, max_frames=cfg.max_frames)
+    ds = CodesDataset(a.shard, tok, max_frames=cfg.max_frames)
     print(f"dataset: {len(ds)} clips")
     dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True,
                     collate_fn=lambda b: collate(b, tok.pad_token_id or 0))
