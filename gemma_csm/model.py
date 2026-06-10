@@ -150,7 +150,10 @@ class GemmaCSM(nn.Module):
             n_keep = max(1, int(len(idx_b) * self.cfg.depth_loss_frame_frac))
             sel = torch.randperm(len(idx_b))[:n_keep]
             ib, it = idx_b[sel], idx_t[sel]
-            frame_h = h[ib, Tt + it]                              # hidden AT frame t
+            # condition on the hidden BEFORE frame t (same position that
+            # predicts its c0) — matching inference, where frame t does not
+            # exist yet. Conditioning on h AT frame t leaks the answer.
+            frame_h = h[ib, Tt + it - 1]
             frame_codes = batch["codes"][ib, :, it]               # (n, 32)
             loss_depth = self.depth.loss(frame_h, frame_codes)
 
