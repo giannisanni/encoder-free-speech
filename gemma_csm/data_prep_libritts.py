@@ -4,14 +4,21 @@ LibriTTS-R layout: <root>/<split>/<speaker>/<chapter>/<utt>.wav with a
 matching <utt>.normalized.txt transcript per utterance. Audio is 24 kHz
 (Mimi's native rate — no resampling needed).
 
-Usage (substrate):
+Usage (substrate), from an extracted directory:
   python -m gemma_csm.data_prep_libritts --root data/LibriTTS_R/train-clean-360 \
       --out data/shards --shard-size 4000 [--limit 200]
+
+Or streaming straight out of the tar.gz — wavs are decoded in memory and
+NEVER extracted to disk (the full extraction would need ~80 GB):
+  python -m gemma_csm.data_prep_libritts --from-tar data/train_clean_360.tar.gz \
+      --out data/shards
 
 Emits libritts_r_<n>.pt shards of items {id, speaker, text, codes}.
 Speaker ids enable M1 voice-cloning pairs (same-speaker context+target).
 """
 import argparse
+import io
+import tarfile
 from pathlib import Path
 
 import soundfile as sf
@@ -73,12 +80,87 @@ def prepare(root: Path, out_dir: Path, shard_size: int = 4000,
     print(f"done: {n_done} encoded, {n_skipped} skipped (rate/length)")
 
 
+def prepare_from_tar(tar_path: Path, out_dir: Path, shard_size: int = 4000,
+                     limit: int | None = None, device: str = "cpu",
+                     max_seconds: float = 13.0):
+    """Single sequential pass over the tar.gz; wavs decoded in memory only.
+
+    Transcripts (.normalized.txt) appear near their wavs in the archive; we
+    buffer whichever of the pair arrives first and emit when both are seen.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    codec = MimiCodec(device=device)
+    items, n_shard, n_done, n_skipped = [], 0, 0, 0
+    texts: dict[str, str] = {}
+    wavs: dict[str, tuple] = {}
+
+    def flush():
+        nonlocal items, n_shard
+        if items:
+            path = out_dir / f"libritts_r_{n_shard:03d}.pt"
+            torch.save(items, path)
+            print(f"wrote {path.name} ({len(items)} items)", flush=True)
+            items, n_shard = [], n_shard + 1
+
+    def emit(stem: str):
+        nonlocal n_done, n_skipped
+        data, speaker = wavs.pop(stem)
+        text = texts.pop(stem)
+        if len(data) > max_seconds * 24_000:
+            n_skipped += 1
+            return
+        wav = torch.from_numpy(data)
+        if wav.ndim > 1:
+            wav = wav.mean(-1)
+        items.append({"id": stem, "speaker": speaker, "text": text,
+                      "codes": codec.encode(wav)})
+        n_done += 1
+        if len(items) >= shard_size:
+            flush()
+
+    with tarfile.open(tar_path, "r|gz") as tf:   # streaming mode: one pass
+        pbar = tqdm(desc="encoding", unit="utt")
+        for member in tf:
+            if limit and n_done >= limit:
+                break
+            name = Path(member.name)
+            stem = name.stem.removesuffix(".normalized").removesuffix(".original")
+            if name.suffix == ".wav":
+                fh = tf.extractfile(member)
+                data, sr = sf.read(io.BytesIO(fh.read()), dtype="float32")
+                if sr != 24_000:
+                    n_skipped += 1
+                    continue
+                speaker = name.parts[-3] if len(name.parts) >= 3 else "unknown"
+                wavs[stem] = (data, speaker)
+            elif name.name.endswith((".normalized.txt", ".original.txt")):
+                if stem in texts:        # prefer .normalized over .original
+                    continue
+                texts[stem] = tf.extractfile(member).read().decode("utf-8").strip()
+            else:
+                continue
+            if stem in wavs and stem in texts:
+                emit(stem)
+                pbar.update(1)
+        pbar.close()
+    flush()
+    print(f"done: {n_done} encoded, {n_skipped} skipped, "
+          f"{len(wavs)} wavs without transcript dropped")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--root", type=Path, required=True)
+    p.add_argument("--root", type=Path, default=None)
+    p.add_argument("--from-tar", type=Path, default=None)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--shard-size", type=int, default=4000)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = p.parse_args()
-    prepare(a.root, a.out, a.shard_size, a.limit, a.device)
+    if a.from_tar:
+        prepare_from_tar(a.from_tar, a.out, a.shard_size, a.limit, a.device)
+    elif a.root:
+        prepare(a.root, a.out, a.shard_size, a.limit, a.device)
+    else:
+        raise SystemExit("give --root <dir> or --from-tar <tar.gz>")

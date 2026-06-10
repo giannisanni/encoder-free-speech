@@ -28,3 +28,25 @@ def test_prepare_libritts_structure(tmp_path):
     assert len(items) == 2                       # long clip skipped
     assert {it["speaker"] for it in items} == {"19", "26"}
     assert all(it["codes"].shape[0] == 32 for it in items)
+
+
+def test_prepare_from_tar_streaming(tmp_path):
+    import tarfile
+    from gemma_csm.data_prep_libritts import prepare_from_tar
+
+    # build a tiny LibriTTS-shaped tar.gz
+    src = tmp_path / "train-clean-360" / "19" / "198"
+    src.mkdir(parents=True)
+    sf.write(str(src / "19_198_0.wav"), np.zeros(24_000, dtype=np.float32), 24_000)
+    (src / "19_198_0.normalized.txt").write_text("Hello.")
+    tar_path = tmp_path / "tc360.tar.gz"
+    with tarfile.open(tar_path, "w:gz") as tf:
+        tf.add(tmp_path / "train-clean-360", arcname="train-clean-360")
+
+    out = tmp_path / "shards"
+    prepare_from_tar(tar_path, out)
+    items = torch.load(sorted(out.glob("*.pt"))[0], weights_only=True)
+    assert len(items) == 1
+    assert items[0]["speaker"] == "19"
+    assert items[0]["text"] == "Hello."
+    assert items[0]["codes"].shape[0] == 32
