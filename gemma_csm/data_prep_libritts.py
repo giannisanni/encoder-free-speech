@@ -149,18 +149,69 @@ def prepare_from_tar(tar_path: Path, out_dir: Path, shard_size: int = 4000,
           f"{len(wavs)} wavs without transcript dropped")
 
 
+def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
+                    limit: int | None = None, device: str = "cpu",
+                    max_seconds: float = 13.0,
+                    split: str = "train.clean.360"):
+    """Stream LibriTTS-R from HuggingFace (mythicinfinity/libritts_r) and
+    Mimi-encode on the fly — no archive download, no extraction."""
+    from datasets import load_dataset
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    codec = MimiCodec(device=device)
+    ds = load_dataset("mythicinfinity/libritts_r", "clean", split=split,
+                      streaming=True)
+    items, n_shard, n_done, n_skipped = [], 0, 0, 0
+
+    def flush():
+        nonlocal items, n_shard
+        if items:
+            path = out_dir / f"libritts_r_{n_shard:03d}.pt"
+            torch.save(items, path)
+            print(f"wrote {path.name} ({len(items)} items)", flush=True)
+            items, n_shard = [], n_shard + 1
+
+    for ex in tqdm(ds, desc="encoding", unit="utt"):
+        if limit and n_done >= limit:
+            break
+        audio = ex["audio"]
+        data, sr = audio["array"], audio["sampling_rate"]
+        if sr != 24_000 or len(data) > max_seconds * sr:
+            n_skipped += 1
+            continue
+        wav = torch.as_tensor(data, dtype=torch.float32)
+        if wav.ndim > 1:
+            wav = wav.mean(-1)
+        items.append({
+            "id": ex.get("id", str(n_done)),
+            "speaker": str(ex.get("speaker_id", "unknown")),
+            "text": (ex.get("text_normalized") or ex.get("text_original") or "").strip(),
+            "codes": codec.encode(wav),
+        })
+        n_done += 1
+        if len(items) >= shard_size:
+            flush()
+    flush()
+    print(f"done: {n_done} encoded, {n_skipped} skipped")
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--root", type=Path, default=None)
     p.add_argument("--from-tar", type=Path, default=None)
+    p.add_argument("--from-hf", action="store_true",
+                   help="stream mythicinfinity/libritts_r from HuggingFace")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--shard-size", type=int, default=4000)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = p.parse_args()
-    if a.from_tar:
+    if a.from_hf:
+        prepare_from_hf(a.out, a.shard_size, a.limit, a.device)
+    elif a.from_tar:
         prepare_from_tar(a.from_tar, a.out, a.shard_size, a.limit, a.device)
     elif a.root:
         prepare(a.root, a.out, a.shard_size, a.limit, a.device)
     else:
-        raise SystemExit("give --root <dir> or --from-tar <tar.gz>")
+        raise SystemExit("give --root <dir>, --from-tar <tar.gz>, or --from-hf")
