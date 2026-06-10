@@ -188,7 +188,8 @@ class GemmaCSM(nn.Module):
 
     # -- inference ---------------------------------------------------------------
     @torch.no_grad()
-    def generate_codes(self, text_ids, max_frames: int = 1000, temperature: float = 0.9):
+    def generate_codes(self, text_ids, max_frames: int = 1000,
+                       temperature: float = 0.9, top_k: int = 0):
         """text_ids: (1, Tt) -> (32, T) codes. No KV cache; fine for M0 eval."""
         x = self._embed_text(text_ids)                            # (1, Tt, d)
         frames = []
@@ -198,6 +199,9 @@ class GemmaCSM(nn.Module):
                 **self._backbone_kwargs(text_ids, len(frames)),
             ).hidden_states[-1][:, -1]                            # (1, d)
             logits = self.c0_head(h).float() / temperature
+            if top_k:
+                kth = logits.topk(top_k, dim=-1).values[..., -1, None]
+                logits = logits.masked_fill(logits < kth, float("-inf"))
             c0 = torch.multinomial(F.softmax(logits, -1), 1)[:, 0]
             if c0.item() == self.cfg.c0_eos_id:
                 break
