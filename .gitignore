@@ -1,0 +1,10 @@
+__pycache__/
+*.pt
+*.wav
+data/
+checkpoints/
+samples/
+.venv/
+.pytest_cache/
+*.egg-info/
+m0a.log
