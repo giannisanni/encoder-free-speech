@@ -70,6 +70,8 @@ def main():
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--out", type=Path, default=Path("checkpoints/run"))
     p.add_argument("--eval-every", type=int, default=500)
+    p.add_argument("--eval-at", default="",
+                   help="comma-separated extra steps to sample at (e.g. 3000,3500)")
     p.add_argument("--resume", type=Path, default=None,
                    help="checkpoint of trainable weights to resume from")
     p.add_argument("--depth-frac", type=float, default=None,
@@ -77,6 +79,7 @@ def main():
     p.add_argument("--depth-lr-mult", type=float, default=1.0,
                    help="depth decoder LR multiplier (PersonaPlex used 2x)")
     a = p.parse_args()
+    eval_at = {int(s) for s in a.eval_at.split(",") if s.strip()}
     a.out.mkdir(parents=True, exist_ok=True)
 
     cfg = GemmaCSMConfig()
@@ -109,7 +112,7 @@ def main():
                       f"depth {out['loss_depth']:.3f}  "
                       f"{(time.time() - t0) / max(step, 1):.2f}s/step", flush=True)
             step += 1
-            if step % a.eval_every == 0 or step >= a.steps:
+            if step % a.eval_every == 0 or step >= a.steps or step in eval_at:
                 save_samples(model, tok, codec, a.out / "samples", step)
                 torch.save(trainable_state_dict(model), a.out / f"ckpt_{step}.pt")
             if step >= a.steps:
