@@ -17,7 +17,11 @@ class CodesDataset(Dataset):
 
     def __getitem__(self, i):
         it = self.items[i]
-        ids = self.tok(it["text"], add_special_tokens=True)["input_ids"]
+        # CSM convention: speaker id as a text prefix, so voice becomes
+        # selectable at inference ("[1234] text..."). Items without a speaker
+        # field (LJSpeech) get the stable id "lj".
+        text = f"[{it.get('speaker', 'lj')}] {it['text']}"
+        ids = self.tok(text, add_special_tokens=True)["input_ids"]
         return {"text_ids": torch.tensor(ids, dtype=torch.long), "codes": it["codes"]}
 
 
