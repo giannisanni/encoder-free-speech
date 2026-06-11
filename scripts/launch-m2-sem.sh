@@ -13,6 +13,11 @@
 # Run on substrate inside tmux: bash ~/gemma-csm/scripts/launch-m2-sem.sh
 set -euo pipefail
 cd ~/gemma-csm
+# r=64 OOMed at step 1050 alongside resident GPU services (mentat camera
+# collector 1.15GB + sunshine); r=32 all-linear fits — QLoRA paper: coverage
+# is the critical variable, rank is not. LORA_R=64 env to retry bigger.
+LORA_R="${LORA_R:-32}"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 nohup .venv/bin/python -m gemma_csm.train \
   --shard data/shards_libritts/libritts_r_*.pt data/shards/ljspeech_13100.pt \
   --steps 80000 --eval-every 2000 \
@@ -20,6 +25,6 @@ nohup .venv/bin/python -m gemma_csm.train \
   --resume checkpoints/m1_data_finish/ckpt_2000.pt \
   --depth-frac 0.25 --depth-lr-mult 2.0 \
   --depth-weight 0.01 \
-  --lora-r 64 --lora-alpha 16 --lora-all-linear \
+  --lora-r "$LORA_R" --lora-alpha 16 --lora-all-linear \
   > ~/m2_sem.log 2>&1 &
 echo "m2_sem launched, log: ~/m2_sem.log"
