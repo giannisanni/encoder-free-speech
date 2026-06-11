@@ -40,9 +40,14 @@ def load_gemma_csm(cfg: GemmaCSMConfig, device: str = "cuda"):
 
     # Gemma 4 wraps projections in Gemma4ClippableLinear; peft can only wrap
     # the inner nn.Linear, so target those by regex (text decoder layers only).
+    if cfg.lora_all_linear:
+        targets = (r"layers\.\d+\.(self_attn\.(q|k|v|o)_proj"
+                   r"|mlp\.(gate|up|down)_proj)(\.linear)?$")
+    else:
+        targets = r"layers\.\d+\.self_attn\.(q|k|v|o)_proj(\.linear)?$"
     lora = LoraConfig(
         r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
-        target_modules=r"layers\.\d+\.self_attn\.(q|k|v|o)_proj(\.linear)?$",
+        target_modules=targets,
     )
     backbone = get_peft_model(backbone, lora)
     backbone.gradient_checkpointing_enable()

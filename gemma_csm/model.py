@@ -184,7 +184,8 @@ class GemmaCSM(nn.Module):
             loss_depth = self.depth.loss(all_h[sel], all_codes[sel])
 
         return {"loss_c0": loss_c0, "loss_depth": loss_depth,
-                "loss": loss_c0 + loss_depth, "c0_logits": c0_logits_padded}
+                "loss": loss_c0 + self.cfg.depth_loss_weight * loss_depth,
+                "c0_logits": c0_logits_padded}
 
     # -- inference ---------------------------------------------------------------
     @torch.no_grad()

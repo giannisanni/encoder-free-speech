@@ -81,6 +81,12 @@ def main():
     p.add_argument("--depth-d-model", type=int, default=None)
     p.add_argument("--depth-layers", type=int, default=None)
     p.add_argument("--depth-heads", type=int, default=None)
+    p.add_argument("--depth-weight", type=float, default=None,
+                   help="scale depth loss in total (Moshi 100:1 -> 0.01)")
+    p.add_argument("--lora-r", type=int, default=None)
+    p.add_argument("--lora-alpha", type=int, default=None)
+    p.add_argument("--lora-all-linear", action="store_true",
+                   help="LoRA on attention + MLP projections (QLoRA coverage)")
     a = p.parse_args()
     eval_at = {int(s) for s in a.eval_at.split(",") if s.strip()}
     a.out.mkdir(parents=True, exist_ok=True)
@@ -94,6 +100,14 @@ def main():
         cfg.depth_layers = a.depth_layers
     if a.depth_heads:
         cfg.depth_heads = a.depth_heads
+    if a.depth_weight is not None:
+        cfg.depth_loss_weight = a.depth_weight
+    if a.lora_r:
+        cfg.lora_r = a.lora_r
+    if a.lora_alpha:
+        cfg.lora_alpha = a.lora_alpha
+    if a.lora_all_linear:
+        cfg.lora_all_linear = True
     model, tok = load_gemma_csm(cfg)
     if a.resume:
         sd = torch.load(a.resume, weights_only=True, map_location="cuda")
