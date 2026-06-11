@@ -4,5 +4,5 @@ set -euo pipefail
 rsync -av --delete \
   --exclude .git --exclude .venv --exclude data --exclude checkpoints \
   --exclude samples --exclude __pycache__ --exclude .pytest_cache \
-  --exclude '*.log' \
+  --exclude '*.log' --exclude runs_tb \
   ~/workspace/gemma-csm/ gianni@substrate:~/gemma-csm/
