@@ -2,6 +2,7 @@
 # Pull eval clips substrate -> Mac (cron-safe). Mirrors
 # checkpoints/<run>/samples/*_s1.wav  to  samples/<run>/  for every run.
 set -euo pipefail
+echo "$(date '+%F %T') tick"
 DEST=~/workspace/gemma-csm/samples
 for run in $(ssh -o BatchMode=yes -o ConnectTimeout=10 gianni@substrate \
     'ls -d ~/gemma-csm/checkpoints/*/samples 2>/dev/null' \
