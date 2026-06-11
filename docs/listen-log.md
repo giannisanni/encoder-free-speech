@@ -14,3 +14,4 @@ Novel-sentence probe is s1: "The quick brown fox jumps over the lazy dog" (not i
 
 Pattern so far: c0 (semantic) loss governs speech-shaped rhythm and duration; depth (acoustic) loss governs word crispness. Perceptual reports have tracked depth loss monotonically.
 | M0b-v2, 26k (66k cumulative) | ~6.45 (flat) | "slightly less mushy, I can ALMOST hear her say the full sentence; 'the quick brown' almost sound like real words; feels like it needs a bit more time" | A/B vs baseline-final: v2 audibly better DESPITE flat aggregate depth loss — perceptual gains likely concentrated in low (acoustically dominant) codebooks that the 31-codebook CE average hides. Third time perceptual eval out-resolved the loss curve |
+| M0b-v2 FINAL, 40k global (80k cumulative) | ~6.3 | "the best one yet" | v2 ends as the project's perceptual peak: primed-intelligible novel speech, monotonically improved throughout. Handoff state for the multi-speaker run |
