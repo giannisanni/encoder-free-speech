@@ -3,7 +3,7 @@
 # newest v2 checkpoint. Lives in the repo so sync-to-substrate preserves it.
 set -euo pipefail
 cd ~/gemma-csm
-CKPT=$(ls -t checkpoints/m0b_v2/ckpt_*.pt | head -1)
+CKPT=$(ls -t checkpoints/m0b_v2*/ckpt_*.pt | head -1)   # prefers v2b (post-outage finish) when present
 echo "resuming from $CKPT"
 nohup .venv/bin/python -m gemma_csm.train \
   --shard data/shards_libritts/*.pt data/shards/ljspeech_13100.pt \
