@@ -78,6 +78,9 @@ def main():
                    help="override cfg.depth_loss_frame_frac (e.g. 0.25)")
     p.add_argument("--depth-lr-mult", type=float, default=1.0,
                    help="depth decoder LR multiplier (PersonaPlex used 2x)")
+    p.add_argument("--depth-d-model", type=int, default=None)
+    p.add_argument("--depth-layers", type=int, default=None)
+    p.add_argument("--depth-heads", type=int, default=None)
     a = p.parse_args()
     eval_at = {int(s) for s in a.eval_at.split(",") if s.strip()}
     a.out.mkdir(parents=True, exist_ok=True)
@@ -85,12 +88,25 @@ def main():
     cfg = GemmaCSMConfig()
     if a.depth_frac is not None:
         cfg.depth_loss_frame_frac = a.depth_frac
+    if a.depth_d_model:
+        cfg.depth_d_model = a.depth_d_model
+    if a.depth_layers:
+        cfg.depth_layers = a.depth_layers
+    if a.depth_heads:
+        cfg.depth_heads = a.depth_heads
     model, tok = load_gemma_csm(cfg)
     if a.resume:
         sd = torch.load(a.resume, weights_only=True, map_location="cuda")
+        # drop keys whose shapes no longer match (e.g. resized depth decoder:
+        # those weights restart from scratch, everything else stays warm)
+        own = model.state_dict()
+        skipped = [k for k, v in sd.items() if k in own and own[k].shape != v.shape]
+        for k in skipped:
+            del sd[k]
         missing, unexpected = model.load_state_dict(sd, strict=False)
         assert not unexpected, f"unexpected keys: {unexpected[:5]}"
-        print(f"resumed trainables from {a.resume}", flush=True)
+        print(f"resumed trainables from {a.resume} "
+              f"({len(skipped)} shape-mismatched keys restart fresh)", flush=True)
     codec = MimiCodec(device="cpu")  # decode for eval on CPU, keep VRAM clean
     ds = CodesDataset(a.shard, tok, max_frames=cfg.max_frames)
     print(f"dataset: {len(ds)} clips")
