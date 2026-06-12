@@ -152,7 +152,8 @@ def prepare_from_tar(tar_path: Path, out_dir: Path, shard_size: int = 4000,
 def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
                     limit: int | None = None, device: str = "cpu",
                     max_seconds: float = 13.0,
-                    split: str = "train.clean.360"):
+                    split: str = "train.clean.360",
+                    prefix: str = "libritts_r"):
     """Stream LibriTTS-R from HuggingFace (mythicinfinity/libritts_r) and
     Mimi-encode on the fly — no archive download, no extraction."""
     from datasets import Audio, load_dataset
@@ -160,7 +161,8 @@ def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     codec = MimiCodec(device=device)
-    ds = load_dataset("mythicinfinity/libritts_r", "clean", split=split,
+    config = "other" if "other" in split else "clean"
+    ds = load_dataset("mythicinfinity/libritts_r", config, split=split,
                       streaming=True)
     # decode=False: skip datasets' torchcodec audio decoding (segfaults
     # without FFmpeg/torchcodec); we decode the flac/wav bytes via soundfile
@@ -170,7 +172,7 @@ def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
     def flush():
         nonlocal items, n_shard
         if items:
-            path = out_dir / f"libritts_r_{n_shard:03d}.pt"
+            path = out_dir / f"{prefix}_{n_shard:03d}.pt"
             torch.save(items, path)
             print(f"wrote {path.name} ({len(items)} items)", flush=True)
             items, n_shard = [], n_shard + 1
@@ -204,13 +206,18 @@ if __name__ == "__main__":
     p.add_argument("--from-tar", type=Path, default=None)
     p.add_argument("--from-hf", action="store_true",
                    help="stream mythicinfinity/libritts_r from HuggingFace")
+    p.add_argument("--split", default="train.clean.360",
+                   help='HF split, e.g. "train.other.500"')
+    p.add_argument("--prefix", default="libritts_r",
+                   help="shard filename prefix (use libritts_o for other-500)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--shard-size", type=int, default=4000)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = p.parse_args()
     if a.from_hf:
-        prepare_from_hf(a.out, a.shard_size, a.limit, a.device)
+        prepare_from_hf(a.out, a.shard_size, a.limit, a.device,
+                        split=a.split, prefix=a.prefix)
     elif a.from_tar:
         prepare_from_tar(a.from_tar, a.out, a.shard_size, a.limit, a.device)
     elif a.root:
