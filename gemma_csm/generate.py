@@ -28,9 +28,19 @@ def main():
     p.add_argument("--depth-d-model", type=int, default=None)
     p.add_argument("--depth-layers", type=int, default=None)
     p.add_argument("--depth-heads", type=int, default=None)
+    # match the checkpoint's LoRA geometry (m2_sem: r32 alpha16 all-linear)
+    p.add_argument("--lora-r", type=int, default=None)
+    p.add_argument("--lora-alpha", type=int, default=None)
+    p.add_argument("--lora-all-linear", action="store_true")
     a = p.parse_args()
 
     cfg = GemmaCSMConfig()
+    if a.lora_r:
+        cfg.lora_r = a.lora_r
+    if a.lora_alpha:
+        cfg.lora_alpha = a.lora_alpha
+    if a.lora_all_linear:
+        cfg.lora_all_linear = True
     if a.depth_d_model:
         cfg.depth_d_model = a.depth_d_model
     if a.depth_layers:
