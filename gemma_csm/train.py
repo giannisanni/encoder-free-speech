@@ -87,6 +87,9 @@ def main():
     p.add_argument("--lora-alpha", type=int, default=None)
     p.add_argument("--lora-all-linear", action="store_true",
                    help="LoRA on attention + MLP projections (QLoRA coverage)")
+    p.add_argument("--keep-ckpts", type=int, default=0,
+                   help="rotate checkpoints, keep newest N (0 = keep all); "
+                        "765MB each filled the disk at m2_sem step 42k")
     a = p.parse_args()
     eval_at = {int(s) for s in a.eval_at.split(",") if s.strip()}
     a.out.mkdir(parents=True, exist_ok=True)
@@ -145,6 +148,11 @@ def main():
             if step % a.eval_every == 0 or step >= a.steps or step in eval_at:
                 save_samples(model, tok, codec, a.out / "samples", step)
                 torch.save(trainable_state_dict(model), a.out / f"ckpt_{step}.pt")
+                if a.keep_ckpts:
+                    by_step = sorted(a.out.glob("ckpt_*.pt"),
+                                     key=lambda p: int(p.stem.split("_")[1]))
+                    for old in by_step[:-a.keep_ckpts]:
+                        old.unlink()
             if step >= a.steps:
                 break
     print("done", flush=True)
