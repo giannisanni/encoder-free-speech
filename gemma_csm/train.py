@@ -105,6 +105,9 @@ def main():
     p.add_argument("--val-shard", type=Path, default=None, nargs="+",
                    help="held-out shard(s) for validation loss (never trained)")
     p.add_argument("--val-every", type=int, default=2000)
+    p.add_argument("--batch-size", type=int, default=None,
+                   help="override cfg.batch_size (A100: 8 with --grad-accum 2)")
+    p.add_argument("--grad-accum", type=int, default=None)
     p.add_argument("--keep-ckpts", type=int, default=0,
                    help="rotate checkpoints, keep newest N (0 = keep all); "
                         "765MB each filled the disk at m2_sem step 42k")
@@ -129,6 +132,10 @@ def main():
         cfg.lora_alpha = a.lora_alpha
     if a.lora_all_linear:
         cfg.lora_all_linear = True
+    if a.batch_size:
+        cfg.batch_size = a.batch_size
+    if a.grad_accum:
+        cfg.grad_accum = a.grad_accum
     model, tok = load_gemma_csm(cfg)
     if a.resume:
         sd = torch.load(a.resume, weights_only=True, map_location="cuda")
