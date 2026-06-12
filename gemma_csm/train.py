@@ -46,6 +46,21 @@ def trainable_state_dict(model):
             if "lora" in k or not k.startswith("backbone.")}
 
 
+@torch.no_grad()
+def evaluate(model, val_dl, max_batches: int = 100):
+    """Mean c0/depth loss over held-out clips (overfitting sentinel)."""
+    model.eval()
+    c0s, depths = [], []
+    for i, batch in enumerate(val_dl):
+        if i >= max_batches:
+            break
+        out = model({k: v.cuda() for k, v in batch.items()})
+        c0s.append(out["loss_c0"].item())
+        depths.append(out["loss_depth"].item())
+    model.train()
+    return sum(c0s) / len(c0s), sum(depths) / len(depths)
+
+
 def make_optimizer(model, lr: float, depth_lr_mult: float = 1.0):
     """AdamW with the depth decoder in its own (optionally hotter) param group.
 
@@ -87,6 +102,9 @@ def main():
     p.add_argument("--lora-alpha", type=int, default=None)
     p.add_argument("--lora-all-linear", action="store_true",
                    help="LoRA on attention + MLP projections (QLoRA coverage)")
+    p.add_argument("--val-shard", type=Path, default=None, nargs="+",
+                   help="held-out shard(s) for validation loss (never trained)")
+    p.add_argument("--val-every", type=int, default=2000)
     p.add_argument("--keep-ckpts", type=int, default=0,
                    help="rotate checkpoints, keep newest N (0 = keep all); "
                         "765MB each filled the disk at m2_sem step 42k")
@@ -129,6 +147,12 @@ def main():
     print(f"dataset: {len(ds)} clips")
     dl = DataLoader(ds, batch_size=cfg.batch_size, shuffle=True,
                     collate_fn=lambda b: collate(b, tok.pad_token_id or 0))
+    val_dl = None
+    if a.val_shard:
+        val_ds = CodesDataset(a.val_shard, tok, max_frames=cfg.max_frames)
+        print(f"val set: {len(val_ds)} clips")
+        val_dl = DataLoader(val_ds, batch_size=cfg.batch_size, shuffle=False,
+                            collate_fn=lambda b: collate(b, tok.pad_token_id or 0))
     opt = make_optimizer(model, cfg.lr, a.depth_lr_mult)
 
     step, t0 = 0, time.time()
@@ -145,6 +169,10 @@ def main():
                       f"depth {out['loss_depth']:.3f}  "
                       f"{(time.time() - t0) / max(step, 1):.2f}s/step", flush=True)
             step += 1
+            if val_dl is not None and step % a.val_every == 0:
+                vc0, vdepth = evaluate(model, val_dl)
+                print(f"val {step}  c0 {vc0:.3f}  depth {vdepth:.3f}",
+                      flush=True)
             if step % a.eval_every == 0 or step >= a.steps or step in eval_at:
                 save_samples(model, tok, codec, a.out / "samples", step)
                 torch.save(trainable_state_dict(model), a.out / f"ckpt_{step}.pt")

@@ -14,19 +14,25 @@ from pathlib import Path
 from torch.utils.tensorboard import SummaryWriter
 
 LINE = re.compile(r"^step (\d+)\s+c0 ([\d.]+)\s+depth ([\d.]+)\s+([\d.]+)s/step")
+VAL = re.compile(r"^val (\d+)\s+c0 ([\d.]+)\s+depth ([\d.]+)")
 
 
 def feed(writer: SummaryWriter, fh, step_offset: int = 0) -> int:
     last = 0
     for line in fh:
         m = LINE.match(line.strip())
-        if not m:
+        if m:
+            step = int(m.group(1)) + step_offset
+            writer.add_scalar("loss/c0_semantic", float(m.group(2)), step)
+            writer.add_scalar("loss/depth_acoustic", float(m.group(3)), step)
+            writer.add_scalar("perf/sec_per_step", float(m.group(4)), step)
+            last = step
             continue
-        step = int(m.group(1)) + step_offset
-        writer.add_scalar("loss/c0_semantic", float(m.group(2)), step)
-        writer.add_scalar("loss/depth_acoustic", float(m.group(3)), step)
-        writer.add_scalar("perf/sec_per_step", float(m.group(4)), step)
-        last = step
+        v = VAL.match(line.strip())
+        if v:
+            step = int(v.group(1)) + step_offset
+            writer.add_scalar("val/c0_semantic", float(v.group(2)), step)
+            writer.add_scalar("val/depth_acoustic", float(v.group(3)), step)
     writer.flush()
     return last
 
