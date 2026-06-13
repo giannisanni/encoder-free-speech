@@ -153,9 +153,16 @@ def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
                     limit: int | None = None, device: str = "cpu",
                     max_seconds: float = 13.0,
                     split: str = "train.clean.360",
-                    prefix: str = "libritts_r"):
+                    prefix: str = "libritts_r",
+                    concat_seconds: float = 0.0):
     """Stream LibriTTS-R from HuggingFace (mythicinfinity/libritts_r) and
-    Mimi-encode on the fly — no archive download, no extraction."""
+    Mimi-encode on the fly — no archive download, no extraction.
+
+    concat_seconds > 0: concatenate consecutive utterances from the SAME
+    speaker+chapter (with a 0.3s gap) into segments up to that length, to
+    teach the model to sustain long/multi-sentence speech. Item text is the
+    joined sentences. Falls back to single utterances at chapter boundaries.
+    """
     from datasets import Audio, load_dataset
 
     out_dir = Path(out_dir)
@@ -168,6 +175,7 @@ def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
     # without FFmpeg/torchcodec); we decode the flac/wav bytes via soundfile
     ds = ds.cast_column("audio", Audio(decode=False))
     items, n_shard, n_done, n_skipped = [], 0, 0, 0
+    gap = torch.zeros(int(0.3 * 24_000))  # inter-sentence silence
 
     def flush():
         nonlocal items, n_shard
@@ -176,6 +184,29 @@ def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
             torch.save(items, path)
             print(f"wrote {path.name} ({len(items)} items)", flush=True)
             items, n_shard = [], n_shard + 1
+
+    def emit(wav, text, speaker, uid):
+        nonlocal n_done
+        items.append({"id": uid, "speaker": speaker, "text": text,
+                      "codes": codec.encode(wav)})
+        n_done += 1
+        if len(items) >= shard_size:
+            flush()
+
+    # concatenation buffer (group = speaker+chapter)
+    buf_wavs, buf_texts, buf_key, buf_id = [], [], None, None
+
+    def buf_dur():
+        return sum(len(w) for w in buf_wavs) / 24_000
+
+    def flush_buf():
+        nonlocal buf_wavs, buf_texts, buf_key, buf_id
+        if buf_wavs:
+            joined = buf_wavs[0]
+            for w in buf_wavs[1:]:
+                joined = torch.cat([joined, gap, w])
+            emit(joined, " ".join(buf_texts), buf_key.split("/")[0], buf_id)
+        buf_wavs, buf_texts, buf_key, buf_id = [], [], None, None
 
     for ex in tqdm(ds, desc="encoding", unit="utt"):
         if limit and n_done >= limit:
@@ -187,15 +218,27 @@ def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
         wav = torch.as_tensor(data, dtype=torch.float32)
         if wav.ndim > 1:
             wav = wav.mean(-1)
-        items.append({
-            "id": ex.get("id", str(n_done)),
-            "speaker": str(ex.get("speaker_id", "unknown")),
-            "text": (ex.get("text_normalized") or ex.get("text_original") or "").strip(),
-            "codes": codec.encode(wav),
-        })
-        n_done += 1
-        if len(items) >= shard_size:
-            flush()
+        speaker = str(ex.get("speaker_id", "unknown"))
+        text = (ex.get("text_normalized") or ex.get("text_original") or "").strip()
+        uid = ex.get("id", str(n_done))
+
+        if concat_seconds <= 0:
+            emit(wav, text, speaker, uid)
+            continue
+
+        # group consecutive utts by speaker+chapter (id = spk_chapter_utt_seg)
+        parts = uid.split("_")
+        key = f"{speaker}/{parts[1] if len(parts) > 1 else '0'}"
+        gap_dur = 0.3 if buf_wavs else 0.0
+        if buf_key is not None and (key != buf_key or
+                buf_dur() + gap_dur + len(wav) / 24_000 > concat_seconds):
+            flush_buf()
+        if buf_key is None:
+            buf_key, buf_id = key, uid
+        buf_wavs.append(wav)
+        buf_texts.append(text)
+    if concat_seconds > 0:
+        flush_buf()
     flush()
     print(f"done: {n_done} encoded, {n_skipped} skipped")
 
@@ -210,14 +253,20 @@ if __name__ == "__main__":
                    help='HF split, e.g. "train.other.500"')
     p.add_argument("--prefix", default="libritts_r",
                    help="shard filename prefix (use libritts_o for other-500)")
+    p.add_argument("--concat-seconds", type=float, default=0.0,
+                   help="concatenate same-speaker+chapter utts into segments "
+                        "up to N seconds (teaches sustaining; e.g. 22)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--shard-size", type=int, default=4000)
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = p.parse_args()
     if a.from_hf:
+        # raise per-utt cap when concatenating so long segments can form
+        ms = max(a.concat_seconds, 13.0) if a.concat_seconds else 13.0
         prepare_from_hf(a.out, a.shard_size, a.limit, a.device,
-                        split=a.split, prefix=a.prefix)
+                        max_seconds=ms, split=a.split, prefix=a.prefix,
+                        concat_seconds=a.concat_seconds)
     elif a.from_tar:
         prepare_from_tar(a.from_tar, a.out, a.shard_size, a.limit, a.device)
     elif a.root:
