@@ -27,3 +27,14 @@ Pattern so far: c0 (semantic) loss governs speech-shaped rhythm and duration; de
 | BLIND #4 (double-blind, m2 vs m1, 2 novel sentences) | m2 c0 ~3.1 vs m1 3.3 | A(m1):0/8, B(m2):"the...box larger" 2/8, C(m2):"winter" 1/8, D(m1):"warm" 0/8 | m2 ~19% vs m1 ~0-6%; both m2 clips yielded real words, neither m1 did; agrees with Whisper era-recall 9%->17% and record 56% clip at true 62k |
 | BLIND #4 re-listen of B (m2) | — | "the third remembered any box larger" | Upgrade to 3/8 (37.5%): "remembered" exact (longest blind-recovered word ever, 4 syllables); "any"~"a heavy", "larger"~"last winter" phonetic echoes; m2 blind total ~25% |
 | m3_long 6k (A100, true step 6k, c0 ~2.9) | c0 2.9 | USER: "really good"; Whisper: "the quick brown fox, just a lazy dog" WER 33% RECALL 67% | PROJECT RECORD by far (prev 56%). First sub-100% WER on fox probe. 6/9 words exact at only 6k steps into m3 — doubled corpus paying off fast |
+
+## M3 BREAKTHROUGH — novel sentences intelligible (ckpt_6000, 2026-06-13 ~01:30)
+Cooled (t0.6 k50) batch from m3 ckpt_6000, Whisper word-recall:
+| ref | heard | recall |
+| fox x3 | varies: "ground fox gents" 22%; "cron-flots lilies" 11%; "quick brown fox jumps from a lazy dog" 78% | hi-variance |
+| She sells seashells by the seashore | "She sells seals by the seashore" | 83% |
+| My brother bought a new red car | "My brother bought a new cart" | 71% |
+| Please close the door before you leave | "Please close the door for relief" | 57% |
+| The weather today is cold and windy | "The work today is all we would do" | 43% |
+| The children played in the park all afternoon | degenerate ramble "thank you very much" | 0% |
+Mean 46% (all 8); novel-sentence mean ~63% excl. degenerate. FIRST intelligible novel speech. Remaining flaws: per-sample variance, occasional 20s degeneration (exposure-bias drift). Validates train-longer+more-data thesis decisively; RQ2 (adapters teach frozen LLM speech) tipping to YES.
