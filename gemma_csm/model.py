@@ -212,3 +212,26 @@ class GemmaCSM(nn.Module):
         if not frames:
             return torch.zeros(32, 1, dtype=torch.long)
         return torch.stack(frames, dim=1)                         # (32, T)
+
+    @torch.no_grad()
+    def generate_wav(self, text_ids, codec, max_frames: int = 1000,
+                     temperature: float = 0.9, top_k: int = 0,
+                     min_rms: float = 0.01, retries: int = 3):
+        """generate_codes + decode, retrying if the result is silent.
+
+        Occasional generations fall into a 'silent attractor' (valid non-EOS
+        c0 tokens that decode to ~silence, run to max_frames). Re-sampling
+        almost always escapes it; nudge temperature up each retry to help.
+        Returns (wav, codes, attempts).
+        """
+        last = None
+        for attempt in range(retries):
+            t = temperature * (1.0 + 0.15 * attempt)
+            codes = self.generate_codes(text_ids, max_frames=max_frames,
+                                        temperature=t, top_k=top_k)
+            wav = codec.decode(codes)
+            rms = wav.float().pow(2).mean().sqrt().item()
+            last = (wav, codes, attempt + 1)
+            if rms >= min_rms:
+                return last
+        return last  # give up; return last attempt rather than hang

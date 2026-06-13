@@ -56,14 +56,15 @@ def main():
     codec = MimiCodec(device="cpu")
     for i, text in enumerate(a.text):
         ids = torch.tensor([tok(text)["input_ids"]], device="cuda")
-        codes = model.generate_codes(ids, max_frames=a.max_frames,
-                                     temperature=a.temperature, top_k=a.top_k)
-        wav = codec.decode(codes)
+        wav, codes, attempts = model.generate_wav(
+            ids, codec, max_frames=a.max_frames,
+            temperature=a.temperature, top_k=a.top_k)
         out = (a.out if len(a.text) == 1
                else a.out.with_name(f"{a.out.stem}_{i:02d}{a.out.suffix}"))
         sf.write(out, wav.float().numpy(), 24_000)
+        retry_note = f", {attempts} attempts (silence-retry)" if attempts > 1 else ""
         print(f"wrote {out} ({codes.shape[1]} frames, "
-              f"{codes.shape[1] / cfg.frame_rate:.1f}s)")
+              f"{codes.shape[1] / cfg.frame_rate:.1f}s{retry_note})")
 
 
 if __name__ == "__main__":

@@ -35,8 +35,7 @@ def save_samples(model, tok, codec, out_dir: Path, step: int):
     out_dir.mkdir(parents=True, exist_ok=True)
     for i, s in enumerate(EVAL_SENTENCES):
         ids = torch.tensor([tok(s)["input_ids"]], device="cuda")
-        codes = model.generate_codes(ids, max_frames=200)
-        wav = codec.decode(codes)
+        wav, _codes, _att = model.generate_wav(ids, codec, max_frames=200)
         sf.write(out_dir / f"step{step:06d}_s{i}.wav", wav.float().numpy(), 24_000)
     model.train()
 
