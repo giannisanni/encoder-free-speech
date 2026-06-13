@@ -62,3 +62,10 @@ CORRECTION 2 (measured energy envelope, user ear was right): long clips have onl
 
 ## A100 FINAL (m3 ckpt_22000, training stopped at user request): step 22000, train c0 2.536, val c0 2.645
 22k cooled battery MEAN RECALL 71% (best yet). "Please close the door" 100% (consistent w/ 20k). "The children played in the park all after[noon]" 88% — THE SAME SENTENCE THAT COLLAPSED TO SILENCE AT 6K now works (model got robust). fox x2 78%/78%, seashells 67%, brother 14% (unlucky). Cooled-battery trend: 6k ~46% -> 20k 66% -> 22k 71%. ckpt_22000 verified on HF. A100 phase done.
+
+## M4 launched (duration fix) — 2026-06-13
+Resumed from m3 ckpt_22000 on 47,840 long-form segments (clean-360 + partial other-500 concat, mean ~17.9s, max 26.6s; --max-frames 300 keeps 99.7%). batch 1, accum 16, depth_weight 0.01 (held to isolate duration variable), 1.2s/step (~1.5-2 days).
+BUG FOUND+FIXED at launch: --max-frames flag was parsed but never applied to cfg (missing override line), so first launch trained on only the ≤160-frame tail (5915 of 48000 segs). Fixed (train.py), relaunched with full 47840 segs.
+Eval clips now include 2 LONG-FORM probes ([3] weather/town, [4] attic letters) at max_frames 400, so flipbook tests sustaining. Relay pulls all _s*.wav.
+step 0 c0 4.73 (vs m3 2.54) — EXPECTED: long sequences are out-of-distribution for the short-clip-trained model; watching c0 recover + silence-collapse disappear = the m4 hypothesis test.
+Also added: data_prep --skip-utts/--shard-start for resumable encoding (other-500-long can be continued from where it stopped). HF storage cleaned 90->~12GB (kept milestone finals + ckpt_22000).
