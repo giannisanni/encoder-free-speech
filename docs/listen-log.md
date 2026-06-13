@@ -38,3 +38,4 @@ Cooled (t0.6 k50) batch from m3 ckpt_6000, Whisper word-recall:
 | The weather today is cold and windy | "The work today is all we would do" | 43% |
 | The children played in the park all afternoon | degenerate ramble "thank you very much" | 0% |
 Mean 46% (all 8); novel-sentence mean ~63% excl. degenerate. FIRST intelligible novel speech. Remaining flaws: per-sample variance, occasional 20s degeneration (exposure-bias drift). Validates train-longer+more-data thesis decisively; RQ2 (adapters teach frozen LLM speech) tipping to YES.
+CORRECTION: m3test_07 is SILENT (peak 0.012 vs ~0.5 normal), not a ramble — model failed to initiate speech, ran to 20s cap emitting silence; Whisper's "thank you very much" was a silence-hallucination. So the failure mode is occasional SILENT DROPOUT, not noise-drift. Novel-sentence intelligibility is 4/4 on clips that actually spoke (83/71/57/43%). Fix candidates: min-length guard, greedy first frame, EOS-timing check.
