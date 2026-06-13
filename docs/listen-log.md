@@ -69,3 +69,9 @@ BUG FOUND+FIXED at launch: --max-frames flag was parsed but never applied to cfg
 Eval clips now include 2 LONG-FORM probes ([3] weather/town, [4] attic letters) at max_frames 400, so flipbook tests sustaining. Relay pulls all _s*.wav.
 step 0 c0 4.73 (vs m3 2.54) — EXPECTED: long sequences are out-of-distribution for the short-clip-trained model; watching c0 recover + silence-collapse disappear = the m4 hypothesis test.
 Also added: data_prep --skip-utts/--shard-start for resumable encoding (other-500-long can be continued from where it stopped). HF storage cleaned 90->~12GB (kept milestone finals + ckpt_22000).
+
+## M4 MILESTONE — silence-collapse CURED + long-form intelligible (step 4000)
+Long-form eval probes (30-word multi-sentence paragraphs), cooled:
+- s3 weather/town: sustains 11.0-11.9s (87-90% voiced, was 2-5s+silence in m3), WER 27% RECALL 82% ("Whatever this morning was cold and gray, but by the afternoon sun broke through the class, and the whole town came alive with people walking, talking...")
+- s4 attic-letters: sustains 12.3-12.7s (86-88% voiced), WER 30% RECALL 82% ("She opened the old wooden box. She hid it in the attic. And inside it were dozens of letters. Each one carefully folded and tied with faded ribbon...")
+At ONLY step 4000 of m4 (resumed m3 ckpt_22000 on 47840 long-concat segs). The concatenated-segment training cured the silence-collapse AND produces intelligible 30-word paragraphs — the duration fix worked, fast. c0 avg 2.57 (≈m3 level maintained on harder long-form). Expect further improvement over the run.
