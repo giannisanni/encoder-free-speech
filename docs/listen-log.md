@@ -47,3 +47,10 @@ COOLED 6k vs 16k head-to-head (fair test): 16k > 6k decisively. Fox mean recall 
 1. **Trailing word echo**: model finishes sentence correctly then re-emits the last word before stopping (e.g. cmp18000_02 "...lazy dog-dog"). Cause: weak/late EOS firing; c0 EOS class under-trained vs content tokens (depth_weight 0.01 pushed training toward semantics). Cosmetic — words are correct. Fixes: (a) sharpens with more training; (b) gen-side trailing-repeat trim; (c) small EOS-prob boost near expected length.
 2. **Silent dropout** (FIXED via generate_wav retry, but root cause remains): occasionally fails to initiate speech, runs to max_frames silent. Retry masks it; same EOS/initiation-timing root as #1.
 Both are length/EOS-control issues, NOT content/intelligibility. Polish-phase work, post-M3.
+
+## Long-sentence probe (18k cooled, max 250 frames)
+Content intelligible for the OPENING clause (~8-12s) then degrades/mis-stops:
+- "weather this morning cold and grey, but by the afternoon..." -> near-verbatim 75%, then ran to 20s cap (tail drift)
+- "She walked slowly down the quiet street..." -> first clause perfect, ran to cap, 47%
+- "My brother...drove to the coast...harbor..." -> captured but compressed, stopped early 5.4s, 67%
+Mean 63% (carried by strong openings). DIAGNOSIS: intelligibility not the limit; SUSTAINING past one clause is. Two causes: (1) EOS/length-control (logged); (2) DATA — training clips capped ~13s (max_seconds 13, max_frames 160), so model never learned to sustain long utterances. Future lever: raise clip-length cap in data prep + EOS fixes.
