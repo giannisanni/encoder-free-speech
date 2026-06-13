@@ -154,7 +154,8 @@ def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
                     max_seconds: float = 13.0,
                     split: str = "train.clean.360",
                     prefix: str = "libritts_r",
-                    concat_seconds: float = 0.0):
+                    concat_seconds: float = 0.0,
+                    skip_utts: int = 0, shard_start: int = 0):
     """Stream LibriTTS-R from HuggingFace (mythicinfinity/libritts_r) and
     Mimi-encode on the fly — no archive download, no extraction.
 
@@ -174,7 +175,13 @@ def prepare_from_hf(out_dir: Path, shard_size: int = 4000,
     # decode=False: skip datasets' torchcodec audio decoding (segfaults
     # without FFmpeg/torchcodec); we decode the flac/wav bytes via soundfile
     ds = ds.cast_column("audio", Audio(decode=False))
-    items, n_shard, n_done, n_skipped = [], 0, 0, 0
+    # resume: skip utts already encoded in a prior run (HF streaming order is
+    # deterministic, so .skip lands at the same point); shard_start avoids
+    # overwriting existing shards on disk.
+    if skip_utts:
+        ds = ds.skip(skip_utts)
+        print(f"resuming: skipped {skip_utts} utts, shards start at {shard_start}", flush=True)
+    items, n_shard, n_done, n_skipped = [], shard_start, 0, 0
     gap = torch.zeros(int(0.3 * 24_000))  # inter-sentence silence
 
     def flush():
@@ -256,6 +263,10 @@ if __name__ == "__main__":
     p.add_argument("--concat-seconds", type=float, default=0.0,
                    help="concatenate same-speaker+chapter utts into segments "
                         "up to N seconds (teaches sustaining; e.g. 22)")
+    p.add_argument("--skip-utts", type=int, default=0,
+                   help="resume: skip first N utts (already encoded last run)")
+    p.add_argument("--shard-start", type=int, default=0,
+                   help="resume: number shards from here (avoid overwrite)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--shard-size", type=int, default=4000)
     p.add_argument("--limit", type=int, default=None)
@@ -266,7 +277,8 @@ if __name__ == "__main__":
         ms = max(a.concat_seconds, 13.0) if a.concat_seconds else 13.0
         prepare_from_hf(a.out, a.shard_size, a.limit, a.device,
                         max_seconds=ms, split=a.split, prefix=a.prefix,
-                        concat_seconds=a.concat_seconds)
+                        concat_seconds=a.concat_seconds,
+                        skip_utts=a.skip_utts, shard_start=a.shard_start)
     elif a.from_tar:
         prepare_from_tar(a.from_tar, a.out, a.shard_size, a.limit, a.device)
     elif a.root:
