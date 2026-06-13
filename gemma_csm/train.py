@@ -107,6 +107,8 @@ def main():
     p.add_argument("--val-shard", type=Path, default=None, nargs="+",
                    help="held-out shard(s) for validation loss (never trained)")
     p.add_argument("--val-every", type=int, default=2000)
+    p.add_argument("--max-frames", type=int, default=None,
+                   help="override cfg.max_frames (raise for long-segment data)")
     p.add_argument("--batch-size", type=int, default=None,
                    help="override cfg.batch_size (A100: 8 with --grad-accum 2)")
     p.add_argument("--grad-accum", type=int, default=None)
