@@ -9,9 +9,18 @@
 set -euo pipefail
 RESUME="${1:-m2_sem_finish/ckpt_40000.pt}"
 
-echo "=== [1/4] deps ==="
+echo "=== [0/4] sshd (CLI-created pods don't start it; needs host keys) ==="
+ssh-keygen -A 2>/dev/null || true
+mkdir -p /run/sshd && (/usr/sbin/sshd 2>/dev/null || true)
+
+echo "=== [1/4] deps (pinned stack — battle-tested 2026-06-12) ==="
+# template torch 2.4 is too old for current transformers (set_submodule);
+# upgrade torch+vision together, REMOVE torchaudio (unused; 2.4 leftover breaks imports)
+pip -q install -U torch torchvision --index-url https://download.pytorch.org/whl/cu124
+pip -q uninstall -y torchaudio 2>/dev/null || true
 pip -q install -U "transformers>=4.46" peft bitsandbytes datasets soundfile \
-  tqdm tensorboard jiwer faster-whisper whisper-normalizer "huggingface_hub[cli]" && (huggingface-cli version >/dev/null 2>&1 || true)
+  tqdm tensorboard jiwer faster-whisper whisper-normalizer pytest \
+  "huggingface_hub[cli]"
 
 echo "=== [2/4] code ==="
 mkdir -p ~/gemma-csm && cd ~/gemma-csm
