@@ -11,22 +11,22 @@ RESUME="${1:-m2_sem_finish/ckpt_40000.pt}"
 
 echo "=== [1/4] deps ==="
 pip -q install -U "transformers>=4.46" peft bitsandbytes datasets soundfile \
-  tqdm tensorboard jiwer faster-whisper whisper-normalizer "huggingface_hub[cli]"
+  tqdm tensorboard jiwer faster-whisper whisper-normalizer "huggingface_hub[cli]" && (huggingface-cli version >/dev/null 2>&1 || true)
 
 echo "=== [2/4] code ==="
 mkdir -p ~/gemma-csm && cd ~/gemma-csm
-huggingface-cli download giannisan/gemma-csm-ckpts code/gemma-csm-code.tar.gz \
+hf download giannisan/gemma-csm-ckpts code/gemma-csm-code.tar.gz \
   --local-dir /tmp/code
 tar xzf /tmp/code/code/gemma-csm-code.tar.gz -C ~/gemma-csm
 # pods have a bare python env, no .venv: shim the scripts' interpreter path
 mkdir -p .venv/bin && ln -sf "$(which python)" .venv/bin/python
 
 echo "=== [3/4] data shards ==="
-huggingface-cli download giannisan/gemma-csm-shards --repo-type dataset \
+hf download giannisan/gemma-csm-shards --repo-type dataset \
   --local-dir data
 echo "=== [3b] resume checkpoint: $RESUME ==="
 mkdir -p "checkpoints/$(dirname "$RESUME")"
-huggingface-cli download giannisan/gemma-csm-ckpts "$RESUME" \
+hf download giannisan/gemma-csm-ckpts "$RESUME" \
   --local-dir checkpoints
 
 echo "=== [4/4] smoke test ==="
