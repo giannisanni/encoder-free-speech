@@ -117,10 +117,13 @@ class GemmaCSM(nn.Module):
 
     # -- training forward ------------------------------------------------------
     def forward(self, batch):
-        """Packs each item contiguously as [text][audio frames] with ALL
-        padding at the tail. Padding between text and audio would shift the
-        audio positions of short-text items relative to inference (which has
-        no padding), corrupting what the model learns about position geometry.
+        """Packs each item contiguously as [text][audio-in?][audio frames] with
+        ALL padding at the tail. The optional audio-in segment -- precomputed
+        backbone-dim embeddings from Gemma's frozen audio tower in
+        batch["audio_in_embeds"] (B, Ta, d) with per-item lengths in
+        batch["audio_in_mask"] -- sits between text and the speech-output frames
+        so the decoder conditions its spoken reply on HOW the input was said
+        (RQ1). When absent (Ta=0) the geometry is identical to text->audio.
         """
         text_e = self._embed_text(batch["text_ids"])             # (B, Tt, d)
         audio_e = self._embed_frames(batch["codes"])             # (B, Tf, d)
@@ -129,32 +132,47 @@ class GemmaCSM(nn.Module):
         L = batch["text_mask"].sum(1)                            # text lens
         Fr = batch["frame_mask"].sum(1) - 1                      # real frame counts
 
-        x = text_e.new_zeros(B, Tt + Tf, text_e.shape[-1])
-        attn = torch.zeros(B, Tt + Tf, dtype=torch.long, device=x.device)
+        ain_e = batch.get("audio_in_embeds")                     # (B, Ta, d) | None
+        if ain_e is not None:
+            Ta = ain_e.shape[1]
+            Ain = batch["audio_in_mask"].sum(1)                  # per-item audio-in lens
+        else:
+            Ta = 0
+            Ain = torch.zeros(B, dtype=torch.long, device=text_e.device)
+
+        W = Tt + Ta + Tf
+        x = text_e.new_zeros(B, W, text_e.shape[-1])
+        attn = torch.zeros(B, W, dtype=torch.long, device=x.device)
         ple = None
         if self.uses_ple:
             ple_text = self.backbone.get_per_layer_inputs(batch["text_ids"], None)
-            ple = ple_text.new_zeros(B, Tt + Tf, *ple_text.shape[2:])
+            ple = ple_text.new_zeros(B, W, *ple_text.shape[2:])
+        out_start = []                                           # output region start per item
         for i in range(B):
-            li, fi = int(L[i]), int(Fr[i])
+            li, ai, fi = int(L[i]), int(Ain[i]), int(Fr[i])
             x[i, :li] = text_e[i, :li]
-            x[i, li : li + fi] = audio_e[i, :fi]
-            attn[i, : li + fi] = 1
+            if ai:
+                x[i, li : li + ai] = ain_e[i, :ai]
+            s = li + ai
+            x[i, s : s + fi] = audio_e[i, :fi]
+            attn[i, : s + fi] = 1
             if ple is not None:
-                ple[i, :li] = ple_text[i, :li]
+                ple[i, :li] = ple_text[i, :li]                   # audio (in & out) get zero PLE
+            out_start.append(s)
         kwargs = {"per_layer_inputs": ple} if ple is not None else {}
         h = self.backbone(
             inputs_embeds=x, attention_mask=attn, output_hidden_states=True,
             **kwargs,
         ).hidden_states[-1]
 
-        # c0: for item i, frame t (0..Fr_i incl. EOS) is predicted from
-        # position L_i - 1 + t — identical to inference geometry.
+        # c0: for item i, output frame t (0..Fr_i incl. EOS) is predicted from
+        # position (out_start_i - 1 + t) -- identical to inference geometry,
+        # with the audio-in context attended to via the prefix.
         pred_hs, c0_tgts, depth_hs, depth_codes = [], [], [], []
         c0_logits_padded = h.new_zeros(B, Tf, self.cfg.codebook_size + 1)
         for i in range(B):
-            li, fi = int(L[i]), int(Fr[i])
-            pos = torch.arange(li - 1, li + fi, device=h.device)
+            s, fi = out_start[i], int(Fr[i])
+            pos = torch.arange(s - 1, s + fi, device=h.device)
             pred_hs.append(h[i, pos])                            # (fi+1, d)
             tgt = torch.cat([
                 batch["codes"][i, 0, :fi],

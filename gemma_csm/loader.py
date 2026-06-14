@@ -12,7 +12,10 @@ def _extract_text_model(full):
     M0 is text->audio only, so we drop the vision/audio towers (saves VRAM).
     The text decoder keeps its PLE embedding tables.
     """
-    for path in ("model.language_model", "language_model"):
+    for path in ("base_model.model.model.language_model",
+                 "base_model.model.language_model",
+                 "model.model.language_model",
+                 "model.language_model", "language_model"):
         obj = full
         try:
             for attr in path.split("."):
@@ -31,7 +34,7 @@ def load_gemma_csm(cfg: GemmaCSMConfig, device: str = "cuda"):
     )
     full = AutoModelForCausalLM.from_pretrained(
         cfg.backbone_id, quantization_config=bnb, dtype=torch.bfloat16,
-        attn_implementation="eager",
+        attn_implementation="sdpa",
     )
     backbone = _extract_text_model(full)
     if backbone is not full:
@@ -58,3 +61,116 @@ def load_gemma_csm(cfg: GemmaCSMConfig, device: str = "cuda"):
     model.c0_head.to(device, torch.bfloat16)
     model.depth.to(device, torch.bfloat16)
     return model, tok
+
+
+# --- Unsloth loader-swap (paper rev. 18) -----------------------------------
+# Load the FROZEN Gemma backbone via Unsloth FastModel (real Gemma kernels +
+# 4-bit + "unsloth" gradient checkpointing) and attach our UNCHANGED audio
+# heads. The architecture (model.py) is untouched; only the backbone load
+# swaps. This is the prototype that verifies rev. 18's one open unknown:
+#   Unsloth must tolerate output_hidden_states=True + custom heads +
+#   per_layer_inputs (PLE) passthrough on the extracted text decoder.
+# Returns the same (model, tok) tuple as load_gemma_csm so train.py and
+# generate.py can switch on a flag. Requires `unsloth` in the active venv.
+def load_gemma_csm_unsloth(cfg: GemmaCSMConfig, device: str = "cuda",
+                           max_seq_length: int = 2048):
+    from unsloth import FastModel  # lazy: only imported when --unsloth is used
+
+    # 1. Load the full multimodal Gemma 4 in 4-bit via Unsloth.
+    full, tok = FastModel.from_pretrained(
+        model_name=cfg.backbone_id,
+        max_seq_length=max_seq_length,
+        load_in_4bit=True,
+        dtype=torch.bfloat16,
+        full_finetuning=False,
+    )
+
+    # 2. LoRA on the LANGUAGE layers only (freeze vision/audio towers -- per
+    #    rev. 17, training Gemma's own audio layers needs >15GB; we use the
+    #    frozen pretrained audio-in path for understanding). Unsloth applies
+    #    LoRA to the full model and routes by the finetune_* flags, keeping us
+    #    on its accelerated path including PLE handling.
+    full = FastModel.get_peft_model(
+        full,
+        r=cfg.lora_r,
+        lora_alpha=cfg.lora_alpha,
+        lora_dropout=cfg.lora_dropout,
+        finetune_vision_layers=False,
+        finetune_language_layers=True,
+        finetune_attention_modules=True,
+        finetune_mlp_modules=cfg.lora_all_linear,
+        use_gradient_checkpointing="unsloth",
+        target_modules=(["q_proj", "k_proj", "v_proj", "o_proj",
+                         "gate_proj", "up_proj", "down_proj"]
+                        if cfg.lora_all_linear else
+                        ["q_proj", "k_proj", "v_proj", "o_proj"]),
+    )
+
+    # 3. Extract the text decoder (drops vision/audio towers from the forward,
+    #    keeps PLE tables + LoRA adapters). _extract_text_model walks the (now
+    #    peft/unsloth-wrapped) tree; if the wrapper changes the attribute path
+    #    this is the first thing to adjust -- verify_unsloth_loader.py probes
+    #    exactly that.
+    backbone = _extract_text_model(full)
+
+    # 4. Attach our unchanged heads (model.py as-is).
+    model = GemmaCSM(cfg, backbone=backbone)
+    model.audio_embs.to(device, torch.bfloat16)
+    model.c0_head.to(device, torch.bfloat16)
+    model.depth.to(device, torch.bfloat16)
+    return model, tok
+
+
+# --- Audio-IN loader (paper rev. 25, RQ1) ----------------------------------
+# Load the full multimodal Gemma ONCE, keep it for get_audio_features (the
+# frozen audio tower + projector = audio understanding), apply LoRA to its text
+# decoder, and attach our speech-out heads. Returns (model, tok, audio_encode):
+#   audio_encode(input_features, input_features_mask) -> (B, Ta, d) backbone-dim
+# embeddings to drop into batch["audio_in_embeds"]. The full model is kept alive
+# via the audio_encode closure (unlike load_gemma_csm, which deletes it).
+def load_gemma_csm_audio_in(cfg: GemmaCSMConfig, device: str = "cuda"):
+    import torch
+    tok = AutoTokenizer.from_pretrained(cfg.backbone_id)
+    bnb = BitsAndBytesConfig(
+        load_in_4bit=True, bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True,
+    )
+    full = AutoModelForCausalLM.from_pretrained(
+        cfg.backbone_id, quantization_config=bnb, dtype=torch.bfloat16,
+        attn_implementation="sdpa",
+    )
+    # inner Gemma4UnifiedModel owns get_audio_features (audio tower + projector)
+    mm = getattr(full, "model", full)
+    assert hasattr(mm, "get_audio_features"), \
+        "backbone has no get_audio_features -- not a unified multimodal model?"
+
+    # the text decoder (LoRA target); audio tower stays frozen
+    backbone = _extract_text_model(full)
+    if cfg.lora_all_linear:
+        targets = (r"layers\.\d+\.(self_attn\.(q|k|v|o)_proj"
+                   r"|mlp\.(gate|up|down)_proj)(\.linear)?$")
+    else:
+        targets = r"layers\.\d+\.self_attn\.(q|k|v|o)_proj(\.linear)?$"
+    lora = LoraConfig(
+        r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
+        target_modules=targets,
+    )
+    backbone = get_peft_model(backbone, lora)
+    backbone.gradient_checkpointing_enable()
+    backbone.enable_input_require_grads()
+
+    model = GemmaCSM(cfg, backbone=backbone)
+    model.audio_embs.to(device, torch.bfloat16)
+    model.c0_head.to(device, torch.bfloat16)
+    model.depth.to(device, torch.bfloat16)
+
+    @torch.no_grad()
+    def audio_encode(input_features, input_features_mask=None):
+        """input_features: (B, num_tokens, audio_embed_dim) -> (B, Ta, d_model).
+        Frozen audio tower; run under no_grad (we don't train Gemma's audio path).
+        """
+        out = mm.get_audio_features(input_features, input_features_mask,
+                                    return_dict=True)
+        return out.pooler_output if hasattr(out, "pooler_output") else out
+
+    return model, tok, audio_encode

@@ -63,17 +63,50 @@ CORRECTION 2 (measured energy envelope, user ear was right): long clips have onl
 ## A100 FINAL (m3 ckpt_22000, training stopped at user request): step 22000, train c0 2.536, val c0 2.645
 22k cooled battery MEAN RECALL 71% (best yet). "Please close the door" 100% (consistent w/ 20k). "The children played in the park all after[noon]" 88% — THE SAME SENTENCE THAT COLLAPSED TO SILENCE AT 6K now works (model got robust). fox x2 78%/78%, seashells 67%, brother 14% (unlucky). Cooled-battery trend: 6k ~46% -> 20k 66% -> 22k 71%. ckpt_22000 verified on HF. A100 phase done.
 
-## M4 launched (duration fix) — 2026-06-13
-Resumed from m3 ckpt_22000 on 47,840 long-form segments (clean-360 + partial other-500 concat, mean ~17.9s, max 26.6s; --max-frames 300 keeps 99.7%). batch 1, accum 16, depth_weight 0.01 (held to isolate duration variable), 1.2s/step (~1.5-2 days).
-BUG FOUND+FIXED at launch: --max-frames flag was parsed but never applied to cfg (missing override line), so first launch trained on only the ≤160-frame tail (5915 of 48000 segs). Fixed (train.py), relaunched with full 47840 segs.
-Eval clips now include 2 LONG-FORM probes ([3] weather/town, [4] attic letters) at max_frames 400, so flipbook tests sustaining. Relay pulls all _s*.wav.
-step 0 c0 4.73 (vs m3 2.54) — EXPECTED: long sequences are out-of-distribution for the short-clip-trained model; watching c0 recover + silence-collapse disappear = the m4 hypothesis test.
-Also added: data_prep --skip-utts/--shard-start for resumable encoding (other-500-long can be continued from where it stopped). HF storage cleaned 90->~12GB (kept milestone finals + ckpt_22000).
+---
+M4 FINAL — 48k battery (ckpt_40000, TB step 48k; cooled t0.6 k50, 10 clips, 5 reused + 5 novel). PROJECT RECORD: mean WER 13%, mean recall 88%.
+- Novel set (91% recall / 9% WER) BEAT reused probes (84% / 17%) -> generalization, not memorization.
+- "Please close the door before you leave" 100%/0%; novel 30-word "parking lot" paragraph 97%/3% near-verbatim; "little dog" 93%; fox 89% ("lazy goat").
+- All 10 clips sustained full length (long ones 9.8-12.2s, 86-90% voiced) -> silence-collapse fully cured.
+- Every remaining error is ACOUSTIC (goat/dog, Backdown/backbone, war-or-light/warm-light, snulled-fably-of-lines/smelled-faintly-of-lavender) not word-dropout -> M5 (acoustic rebalance) is the correct next lever.
+- m4 c0 trend (all-5 reused comparability): TB 30k 75% -> 36k 79% -> 42k 71% -> 44k 81% -> 48k 84%; plateaued. Train c0 ~1.8-2.1, no held-out val tracked for m4 (m4b relaunch omitted --val-shard; restored for m5). Trainer stopped at ckpt_40000 for M5 handoff.
 
-## M4 MILESTONE — silence-collapse CURED + long-form intelligible (step 4000)
-Long-form eval probes (30-word multi-sentence paragraphs), cooled:
-- s3 weather/town: sustains 11.0-11.9s (87-90% voiced, was 2-5s+silence in m3), WER 27% RECALL 82% ("Whatever this morning was cold and gray, but by the afternoon sun broke through the class, and the whole town came alive with people walking, talking...")
-- s4 attic-letters: sustains 12.3-12.7s (86-88% voiced), WER 30% RECALL 82% ("She opened the old wooden box. She hid it in the attic. And inside it were dozens of letters. Each one carefully folded and tied with faded ribbon...")
-At ONLY step 4000 of m4 (resumed m3 ckpt_22000 on 47840 long-concat segs). The concatenated-segment training cured the silence-collapse AND produces intelligible 30-word paragraphs — the duration fix worked, fast. c0 avg 2.57 (≈m3 level maintained on harder long-form). Expect further improvement over the run.
+---
+M5 first perceptual reading (acoustic rebalance, depth_weight 0.01->0.3, ckpt_4000, ~4k steps): PRIMED listen, Gianni reports clips sound "a little less robotic" than m4. CALIBRATION: primed (knew which was m5), small-n, early (4k). Consistent with theory: val_depth flat (val2000 6.565 -> val4000 6.554) because ~6.3 is largely the Mimi codec entropy floor, so the rebalance payoff shows up as timbre, NOT a depth-loss drop. Training c0 1.4-2.3 (no intelligibility regression). NOT yet confirmed -> blind A/B (m4-40000 vs m5-latest, shuffled) deferred to a later checkpoint (12k/20k) when the gap should be wider. m5 left running uninterrupted.
 
-M4 OOM-recovery (ops, no progress lost): m4 died silently at step 8300 (OS/CUDA OOM on a long-seq batch at max-frames 300; c0 had hit 1.25@8050, new low). Resumed from ckpt_8000 at --max-frames 250 (drops 20-24s tail, 47840->29523 segs) + PYTORCH_CUDA_ALLOC_CONF=expandable_segments to avoid fragmentation OOM. VRAM 14.2->12.7GB. Log now ~/m4b.log, TB run 7_m4_long step-offset 8000. Milestone (long-form cured+82% recall) stands; this was purely ops.
+---
+M5 FINAL — acoustic rebalance (depth_weight 0.01->0.3) = NEGATIVE RESULT. Stopped at ckpt_10000.
+WER battery: m4-final + m5 {2,4,6,8,10}k x 5 sentences (30 clips), cooled. mean recall 80%, WER 26%.
+- depth_acoustic FLAT 2k->10k: val depth 6.565/6.554/6.604/6.604/6.548. 30x weight bump moved acoustic loss ZERO. 2nd independent confirmation of the Mimi codec entropy floor (1st = capacity run: 150M==425M both pinned ~6.7).
+- No intelligibility win: m5 recall bounces 74-89% (8k best, 10k regresses to m4 ~79%); within noise of m4.
+- INTRODUCED stutter (depth_weight shock destabilized generation, invisible to CE loss = repeated valid tokens): s4_attic@4k repeats whole opening phrase (WER 64% recall 42%); mild repeats fox@6k ("the love of the"), printing@8k ("from all from all"), weather@8k ("but by but by"). Scattered, not a clean transient, not resolved by 10k. Confirms Gianni ear-report of 4k/6k stutter.
+- VERDICT: loss-weight knob is a dead end for naturalness (no acoustic gain, no intelligibility gain, adds instability). Naturalness needs the flow-matching/diffusion acoustic head (continuous features, below the discrete-codec floor). m5 not resumed. GPU free.
+
+---
+UNSLOTH LOADER-SWAP VALIDATED on E2B (2026-06-14). scripts/verify_unsloth_loader.py: ALL PASS.
+- Unsloth FastModel patches Gemma4 + get_peft_model LoRA; extracted text decoder has hidden_size=1536, get_input_embeddings, get_per_layer_inputs (PLE survives wrapper = the key unknown). forward(output_hidden_states + our c0/depth heads + PLE) + backward both work.
+- Fix needed: _extract_text_model path base_model.model.model.language_model (Unsloth/PEFT wrapper); plain path returned multimodal model whose top config lacks hidden_size.
+- VRAM: E2B via Unsloth 10.97GB (batch1 fwd+bwd) vs 12.2GB our default loader -> ~1.2GB lighter, with Unsloth cpp-ext DISABLED (torch 2.10<2.11). Good for 12B-fits-16GB.
+- rev.18 loader-swap is real. Next: download gemma-4-12b, run same probe for real VRAM (blocked: ~25GB vs ~18GB free, needs disk cleanup). venv ~/unsloth-venv isolated from training .venv.
+
+---
+12B FITS (2026-06-14): google/gemma-4-12B-it probed via DEFAULT bitsandbytes loader (transformers 5.10.2 supports gemma4_unified; Unsloth 5.5.0 does NOT -> Unsloth-12B parked). Loads, heads attach, fwd+bwd+grads OK. PEAK VRAM 10.59GB (probe tiny-seq) -> ~5GB headroom; est ~12-14GB at real 250-frame training. LIGHTER than E2B (12.2GB) because 12B Unified is a clean dense decoder, NO PLE (hidden_size_per_layer_input=0), NO KV-share. Overturns rev.20 edge-case worry. RQ1 12B run feasible on free substrate, no cloud. Next build: audio-IN path (keep+freeze the native audio tower, scatter its embeds into inputs_embeds before our speech-out heads; cheap passthrough probe first; data is the hard part). See paper rev.23.
+
+---
+AUDIO-IN WIRING CONFIRMED (2026-06-14, scripts/probe_audio_in.py). gemma4_unified audio API: get_audio_features(input_features (N,640), mask) on full.model (Gemma4UnifiedModel) -> backbone-dim 3840; merge via masked_scatter at audio_token_id=258881. Probe (synthetic 640-d feats): PASS, (1,50,640)->(1,50,3840), 7.74GB. RQ1 audio-IN de-risked at wiring level. ONE blocker for real audio: Gemma4UnifiedProcessor (waveform->features) not importable in transformers 5.10.2 -> defer real-audio (build/source/wait for the feature extractor). Remaining build: audio-IN loader (keep full model), forward scatter, feature frontend, paired prosody data. See paper rev.24.
+
+---
+RQ1 GATES CLOSED (2026-06-14). Three blockers for the 12B thesis run resolved:
+1. AUDIO-IN FORWARD validated: GemmaCSM.forward additive [text|audio-in|audio-out] branch (consumes precomputed audio_in_embeds, shifts output positions, text->audio path byte-identical when absent). Probe on 12B PASS: text->audio loss 18.5 (regression ok), audio-IN loss 18.1, grads flow 2.15e5, peak 11.05GB (batch1, ~4.5GB headroom). scripts/probe_audio_in_forward.py.
+2. PROCESSOR located: Gemma4UnifiedProcessor absent in transformers 5.10.2, PRESENT in 5.13.0.dev0 (git source); needs "vision" backend (pillow+torchvision) to instantiate (unified img+audio+video processor). Audio-IN venv = transformers-from-source + torch/torchvision/pillow + bnb + audio deps.
+3. DATASET chosen: CASIA-LM/OpenS2S_Datasets (HF, Apache-2.0, ungated, ~50k EN input-speech->emotion-conditioned response-speech pairs, synthetic prosody = fine for bootstrapping). Supplements CREMA-D (ODbL parallel emotion), AMI (CC-BY real prosody). On-task-but-NC: Expresso/Seamless/ESD/DeepDialogue.
+Remaining = BUILD not unknowns: data pipeline (OpenS2S->input_features->get_audio_features->audio_in_embeds; output->Mimi codes), wire audio-encode into loop, audio-IN venv, accept heads train from scratch (d 1536->3840). See paper rev.25.
+
+---
+AUDIO-IN BUILD STARTED (2026-06-14). loader.py::load_gemma_csm_audio_in written (keeps full model for get_audio_features, LoRA text decoder, frozen audio tower, returns audio_encode). data_prep_opens2s.py written vs real manifest schema (query/response audio+text+emotion). OpenS2S EN wavs = 87.9GB compressed (query 19 + response 69) >> 29GB free -> data_prep must STREAM a subset from tars (no full download), encode on the fly. audio-IN venv ~/audioin-venv building: torch+torchvision cu128 + transformers-from-source(5.13) + bnb + peft + pillow + soundfile. Loader+forward validated on synthetic (rev.24/25); remaining: finish venv, stream-subset rewrite, few-pair test (verify processor audio key + Mimi resample), wire audio-encode into train.py. Paper rev.26.
+
+---
+OPENS2S DATA PIPELINE WORKS (2026-06-14). data_prep_opens2s.py --stream validated end-to-end on real data (audio-IN venv). Streaming-subset: tars not index-ordered -> take first-K encountered + intersect; 600/600 first-K -> 590 paired (98% overlap), leading bytes only (no 88GB DL). Real shard (14 enc/6 skip>20s): {input_features (138,640) fp16, codes (32,214) i64, text, query_text, emotion="Frustrated"}. Verify-points resolved: processor key=input_features, Mimi resample OK. Data side of RQ1 done. Remaining: training-loop wiring (OpenS2S dataset+collate, loop runs audio_encode->audio_in_embeds->forward). Loader+forward already validated. Paper rev.27.
+
+---
+AUDIO-IN TRAIN LOOP VALIDATED end-to-end (2026-06-14). dataset_opens2s.py (OpenS2SDataset + collate_opens2s w/ max_audio/max_frames caps) + scripts/probe_audio_in_train.py. Tiny test (real OpenS2S shard, batch1, audio48/codes100): PASS. text(1,54)+codes(1,32,101)+input_features(1,48,640) -> audio_encode -> audio_in_embeds(1,48,3840) -> forward loss 18.49 -> backward grads 1.11e5, peak 13.72GB. FULL RQ1 chain runs on real data on free 16GB card. QLoRA: yes (4bit NF4 + LoRA r32 all-linear); use PagedAdamW8bit for the real 12B run (memory). Memory: full real seq ~380tok OOMs batch1 (~15.5GB); capped ~200tok fits 13.72GB -> real run = short clips + batch1 + grad-accum + paged opt. Heads train from scratch (d3840). Every RQ1 component validated; remaining = train-loop assembly + shards + time, no unknowns. Paper rev.28.

@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from gemma_csm.codec import MimiCodec
 from gemma_csm.config import GemmaCSMConfig
 from gemma_csm.dataset import CodesDataset, collate
-from gemma_csm.loader import load_gemma_csm
+from gemma_csm.loader import load_gemma_csm, load_gemma_csm_unsloth
 
 EVAL_SENTENCES = [
     # [0] is in the 50-clip M0a training set (memorization probe);
@@ -109,6 +109,8 @@ def main():
     p.add_argument("--lora-alpha", type=int, default=None)
     p.add_argument("--lora-all-linear", action="store_true",
                    help="LoRA on attention + MLP projections (QLoRA coverage)")
+    p.add_argument("--unsloth", action="store_true",
+                   help="load backbone via Unsloth FastModel (rev.18 loader-swap)")
     p.add_argument("--val-shard", type=Path, default=None, nargs="+",
                    help="held-out shard(s) for validation loss (never trained)")
     p.add_argument("--val-every", type=int, default=2000)
@@ -147,9 +149,10 @@ def main():
         cfg.grad_accum = a.grad_accum
     if a.max_frames:
         cfg.max_frames = a.max_frames
-    model, tok = load_gemma_csm(cfg)
+    model, tok = (load_gemma_csm_unsloth(cfg) if a.unsloth
+                  else load_gemma_csm(cfg))
     if a.resume:
-        sd = torch.load(a.resume, weights_only=True, map_location="cuda")
+        sd = torch.load(a.resume, weights_only=True, map_location="cpu")
         # drop keys whose shapes no longer match (e.g. resized depth decoder:
         # those weights restart from scratch, everything else stays warm)
         own = model.state_dict()
@@ -158,6 +161,8 @@ def main():
             del sd[k]
         missing, unexpected = model.load_state_dict(sd, strict=False)
         assert not unexpected, f"unexpected keys: {unexpected[:5]}"
+        del sd, own
+        torch.cuda.empty_cache()
         print(f"resumed trainables from {a.resume} "
               f"({len(skipped)} shape-mismatched keys restart fresh)", flush=True)
     codec = MimiCodec(device="cpu")  # decode for eval on CPU, keep VRAM clean
