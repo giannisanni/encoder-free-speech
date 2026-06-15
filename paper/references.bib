@@ -42,10 +42,11 @@
   note   = {TODO: reference details}
 }
 
-@misc{kortexa2026loraBridges,
+@misc{penov2026loraBridges,
   title  = {Conditional LoRA Bridges for Modular Sensor Adaptation of Frozen Small Language Models},
-  author = {Penov, Franci and {kortexa.ai}},
+  author = {Penov, Franci},
   year   = {2026},
-  howpublished = {\url{https://research.kortexa.ai/}},
-  note   = {Independent self-published; related work -- dynamically generated LoRA conditioning a frozen LLM on a new input modality. TODO: verify exact citation/date.}
+  month  = jun,
+  howpublished = {kortexa.ai (LegoLM), self-published. \url{https://github.com/kortexa-ai/legolm.paper}},
+  note   = {Hypernetwork generates LoRA from frozen sensor-encoder features, injected into a frozen 33.6M LM (vision/audio/IMU). Key finding: aggregate LM loss (BPB) cannot detect conditioning; task-aligned probes can. Diversity reg. needed to avoid hypernetwork weight collapse.}
 }

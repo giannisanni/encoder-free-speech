@@ -66,13 +66,25 @@ Research questions:
 
 \section{Related Work}
 \label{sec:related}
-\todo{
-\begin{itemize}
-  \item Speech/audio LLMs with external encoders (Whisper-front-ended, etc.).
-  \item CSM / Sesame; Mimi neural audio codec (RVQ, 12.5\,Hz).
-  \item Multimodal Gemma backbones; native audio pathways.
-  \item QLoRA / parameter-efficient adaptation of frozen quantized LLMs.
-\end{itemize}}
+\todo{Full pass. Cover: speech/audio LLMs with external ASR encoders;
+CSM/Sesame; the Mimi RVQ codec (12.5\,Hz); multimodal Gemma backbones and native
+audio pathways; QLoRA / parameter-efficient adaptation of frozen quantized LLMs.}
+
+\paragraph{Conditioning frozen LMs on new modalities.}
+Closest to our setting, \citet{penov2026loraBridges} adapt a \emph{frozen} small
+language model to sensor streams (vision, audio, IMU) via \emph{conditional LoRA
+bridges}: a hypernetwork generates LoRA weights at runtime from a frozen sensor
+encoder's features, injected into the frozen transformer. We share the premise
+of adapting a frozen quantized LLM to a non-text input without retraining the
+backbone, but differ sharply in mechanism and goal: (i)~we use the backbone's
+\emph{native, encoder-free} audio pathway rather than a separate sensor encoder
+feeding a weight-generating hypernetwork; (ii)~our adapters are \emph{fixed} LoRA
+on the decoder plus dedicated speech-output heads, not input-conditioned
+generated weights; and (iii)~we target \emph{bidirectional conversational speech}
+(audio in \emph{and} out), not input-side conditioning of a text-only LM.
+Methodologically their study and ours converge on the same warning
+(\S\ref{sec:findings}): an aggregate language-modeling loss does not measure the
+capability of interest, and a task-grounded probe is required to see it.
 
 \section{Method}
 \label{sec:method}
@@ -121,6 +133,13 @@ clips.} \pending
 \todo{Table: an OpenS2S Phase-A model reached teacher-forced $c_0{=}1.3$ but was
 memorizing 636 examples; held-out $c_0$ 2.3 (trained) vs 8.2 (unseen); decoded
 WER 141\%, word-recall 12\%. Conclusion: WER-gate, never judge from $c_0$.}
+
+This dissociation mirrors \citet{penov2026loraBridges}: there, aggregate
+language-modeling loss (bits-per-byte) cannot detect sensor conditioning---a
+capacity-matched constant-feature control reproduces the entire metric gain---and
+only task-aligned probes expose it. We observe the analogous gap between
+teacher-forced $c_0$ (low even when the model cannot speak) and free-running WER,
+which we therefore adopt as the gate.
 
 % \begin{table}[t]\centering
 % \caption{Teacher-forced $c_0$ vs free-running WER.}
