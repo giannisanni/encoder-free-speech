@@ -1,0 +1,159 @@
+% gemma-csm paper skeleton.
+% Self-contained: compiles with a standard TeX install (no conference .sty needed).
+% Swap \documentclass to neurips/icml/interspeech template when targeting a venue.
+% Build:  latexmk -pdf main.tex   (or: pdflatex main && bibtex main && pdflatex main x2)
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{microtype}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{xcolor}
+
+% --- draft helpers (remove for camera-ready) ---
+\newcommand{\todo}[1]{\textcolor{red}{[\textbf{TODO:} #1]}}
+\newcommand{\pending}{\textcolor{orange}{[\emph{result pending}]}}
+
+\title{Conversational Speech Generation on an Encoder-Free\\ Multimodal Backbone}
+\author{Gianni Sanrochman\\ \texttt{giannisanrochman@gmail.com}}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+\todo{Write last. One paragraph: encoder-free Gemma-4 backbone + Mimi/CSM speech
+codec; lightweight QLoRA adapters teach a frozen 4-bit LLM to (RQ2) speak and
+(RQ1) produce speech conditioned on \emph{how} an audio query was said; trained
+on a single 16\,GB GPU. State the headline result and the key negative finding
+(teacher-forced loss is not intelligibility; codec entropy floor caps
+naturalness).}
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+\todo{Motivate: most speech LLMs bolt a separate audio encoder onto the LM. We
+ask whether a frozen multimodal LLM's \emph{native} audio pathway is enough.}
+
+Research questions:
+\begin{itemize}
+  \item \textbf{RQ2 (foundation).} Can lightweight adapters teach a frozen 4-bit
+        LLM to generate intelligible speech? \todo{cite our E2B result.}
+  \item \textbf{RQ1 (thesis).} Using the backbone's encoder-free audio input,
+        can the model produce a spoken response \emph{conditioned on how the
+        query was said} (prosody/emotion), not just what was said?
+\end{itemize}
+
+\paragraph{Contributions.}
+\begin{enumerate}
+  \item An encoder-free recipe coupling Gemma-4's native audio features with a
+        CSM-style speech-output head (semantic codebook + depth transformer over
+        Mimi RVQ codes), trainable end-to-end under QLoRA on 16\,GB.
+  \item \todo{RQ1 result.} \pending
+  \item A methodological finding: teacher-forced codebook cross-entropy ($c_0$)
+        is \emph{not} a proxy for free-running intelligibility; word error rate
+        (WER) on decoded audio is the necessary gate (\S\ref{sec:findings}).
+  \item A characterization of the Mimi codec entropy floor that caps naturalness
+        under cross-entropy training, motivating a flow-matching acoustic head.
+\end{enumerate}
+
+\section{Related Work}
+\label{sec:related}
+\todo{
+\begin{itemize}
+  \item Speech/audio LLMs with external encoders (Whisper-front-ended, etc.).
+  \item CSM / Sesame; Mimi neural audio codec (RVQ, 12.5\,Hz).
+  \item Multimodal Gemma backbones; native audio pathways.
+  \item QLoRA / parameter-efficient adaptation of frozen quantized LLMs.
+\end{itemize}}
+
+\section{Method}
+\label{sec:method}
+\subsection{Encoder-free backbone}
+\todo{Gemma-4 ``Unified''; audio input via \texttt{get\_audio\_features}
+(640$\to$3840, 1:1 time), merged at audio placeholder tokens. No separate ASR
+encoder.}
+
+\subsection{Speech-output head}
+\todo{Sequence layout \texttt{[text $\mid$ audio-in $\mid$ audio-out frames]};
+$c_0$ semantic head + depth transformer predicting Mimi codebooks 1--31;
+loss $=\mathcal{L}_{c_0} + \lambda\,\mathcal{L}_{\text{depth}}$.}
+
+\subsection{QLoRA training on 16\,GB}
+\todo{4-bit NF4 frozen backbone + LoRA (r32, all-linear) + PagedAdamW8bit;
+batch-1 + grad-accum; sequence caps. Heads trained from scratch (no warm-start
+at $d_{\text{model}}{=}3840$).}
+
+\subsection{Curriculum: Phase A then Phase B}
+\todo{Phase A (text$\to$speech) teaches the head to speak on clean read speech
+(LibriTTS). Phase B (audio-in on) resumes from a speaking model and learns
+understanding-conditioned response on conversational query/response audio
+(OpenS2S). Explain why this order is forced.}
+
+\section{Experimental Setup}
+\label{sec:setup}
+\paragraph{Data.} Phase A: LibriTTS (\todo{$\sim$110\,h, 90.6k clips used}).
+Phase B: OpenS2S query/response speech pairs. \todo{licensing; Mimi encoding at
+12.5\,Hz.}
+\paragraph{Hardware.} Single 16\,GB consumer GPU. \todo{exact card; VRAM budget.}
+\paragraph{Evaluation.} Free-running decode $\to$ faster-whisper transcription
+$\to$ WER and word-recall against held-out references; mean-opinion / blind
+listening for naturalness. \todo{describe harness, normalization.}
+
+\section{Results}
+\label{sec:results}
+\subsection{RQ2: adapters teach a frozen LLM to speak}
+\todo{E2B m-series: intelligibility (M3), duration (M4). Report WER on held-out
+clips.} \pending
+
+\subsection{RQ1: understanding-conditioned response}
+\todo{12B encoder-free, Phase A (LibriTTS) WER then Phase B.} \pending
+
+\subsection{Key finding: $c_0$ is not intelligibility}
+\label{sec:findings}
+\todo{Table: an OpenS2S Phase-A model reached teacher-forced $c_0{=}1.3$ but was
+memorizing 636 examples; held-out $c_0$ 2.3 (trained) vs 8.2 (unseen); decoded
+WER 141\%, word-recall 12\%. Conclusion: WER-gate, never judge from $c_0$.}
+
+% \begin{table}[t]\centering
+% \caption{Teacher-forced $c_0$ vs free-running WER.}
+% \begin{tabular}{lccc}\toprule
+%  Model & $c_0$ trained & $c_0$ unseen & WER \\ \midrule
+%  ckpt\_6000 (636 pairs)  & 2.31 & 8.18 & -- \\
+%  ckpt\_14000 (2097)      & 1.56 & 2.09 & 141\% \\ \bottomrule
+% \end{tabular}\end{table}
+
+\subsection{Codec entropy floor}
+\todo{depth\_acoustic loss does not fall below $\sim$6.3--6.6 (Mimi RVQ);
+loss-weight tuning (M5) did not help. Implies CE over RVQ codes caps naturalness.}
+
+\section{Discussion \& Limitations}
+\label{sec:discussion}
+\todo{Data scale for from-scratch speech heads; codec floor vs flow-matching
+acoustic head; single-GPU constraints; conversational vs read-speech prosody gap.}
+
+\section{Conclusion}
+\label{sec:conclusion}
+\todo{One paragraph.}
+
+\section*{Reproducibility}
+Code: \url{https://github.com/giannisanni/gemma-csm}. \todo{Checkpoints/data on
+HF; full build-log in appendix.}
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\appendix
+\section{Reproducibility build-log}
+\todo{Port the vault note's rev. build-log: venvs, the gemma4\_unified audio API,
+exact commands, dataset prep (multi-piece OpenS2S streamer), atomic
+checkpointing, resume, the WER harness.}
+
+\end{document}
