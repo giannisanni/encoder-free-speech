@@ -158,8 +158,32 @@ listening for naturalness. \todo{describe harness, normalization.}
 \section{Results}
 \label{sec:results}
 \subsection{RQ2: adapters teach a frozen LLM to speak}
-\todo{E2B m-series: intelligibility (M3), duration (M4). Report WER on held-out
-clips.} \pending
+\label{sec:rq2}
+We establish RQ2 on the smaller E2B backbone (text$\to$speech; with no audio
+input involved, the encoder-free distinction does not apply here). Intelligibility
+is measured by free-running decode followed by Whisper~\citep{radford2023whisper}
+transcription; we report word-recall (fraction of reference words recovered;
+insertion-immune, as WER saturates above 100\% at low intelligibility) and WER.
+
+\textbf{Intelligibility (M3).} Trained on $\sim$840\,h (LibriTTS-R + LJSpeech),
+the frozen 4-bit LLM with QLoRA adapters and the speech head reached a
+final-checkpoint mean battery word-recall of \textbf{71\%}, with multiple novel
+sentences at 100\% recall (e.g.\ ``Please close the door before you leave'');
+train/val $c_0$ were 2.54/2.65 with no overfitting gap. To our knowledge this is
+the first demonstration of intelligible speech from a \emph{fully frozen,
+quantized} LLM via parameter-efficient adaptation alone, produced on a single
+16\,GB GPU plus a ${\sim}\$7$ rented-A100 session.
+
+\textbf{Duration (M4).} A same-speaker concatenation phase (mean ${\sim}18$\,s
+clips) cured early truncation: speech sustains ${\sim}11$--$13$\,s at 86--90\%
+voiced. Final 10-clip battery: \textbf{mean WER 13\%, word-recall 88\%} (novel
+sentences 91\%/9\%; reused probes 84\%/17\%), with $c_0\approx2.15$. Residual
+errors are acoustic, not lexical (``lazy goat''/dog).
+
+\textbf{Human--machine agreement.} Double-blind human transcription tracked the
+Whisper recall harness closely (human 14--22\% vs.\ machine ${\sim}18$\% in the
+M2 era), supporting free-running WER/recall as the quality gate rather than
+teacher-forced loss.
 
 \subsection{RQ1: understanding-conditioned response}
 \todo{12B encoder-free, Phase A (LibriTTS) WER then Phase B.} \pending
@@ -186,8 +210,17 @@ which we therefore adopt as the gate.
 % \end{tabular}\end{table}
 
 \subsection{Codec entropy floor}
-\todo{depth\_acoustic loss does not fall below $\sim$6.3--6.6 (Mimi RVQ);
-loss-weight tuning (M5) did not help. Implies CE over RVQ codes caps naturalness.}
+\label{sec:codecfloor}
+The acoustic (``depth'') loss plateaus at ${\sim}6.7$ and does not fall further.
+Scaling the depth transformer from 150M to ${\sim}425$M parameters did not lower
+the plateau, so it is not a capacity limit; it tracks Mimi's intrinsic
+per-codebook entropy (${\sim}6.3$--$6.6$). M5 confirmed this independently: a
+$30\times$ increase in the depth-loss weight ($0.01\to0.3$) produced \emph{zero}
+reduction in held-out acoustic loss (validation depth flat at 6.55--6.60 across
+2--10k steps), no intelligibility gain, and introduced stutter (repeated valid
+codec frames, invisible to per-frame cross-entropy). Cross-entropy over discrete
+RVQ codes therefore caps naturalness; closing it requires a flow-matching /
+diffusion acoustic head over continuous features, not a loss-weight knob.
 
 \section{Discussion \& Limitations}
 \label{sec:discussion}
