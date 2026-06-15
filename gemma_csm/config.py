@@ -34,7 +34,7 @@ class GemmaCSMConfig:
     lora_all_linear: bool = False
 
     # training
-    lr: float = 2e-4
+    lr: float = 3e-4
     batch_size: int = 2
     grad_accum: int = 8
     max_frames: int = 160          # ~12.8 s clips max for M0

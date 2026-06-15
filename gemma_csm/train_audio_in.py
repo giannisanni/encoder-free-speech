@@ -16,6 +16,7 @@ Run (audio-IN venv):
 """
 import argparse
 import glob
+import functools
 import os
 import time
 import re
@@ -26,6 +27,7 @@ from torch.utils.data import DataLoader
 
 from gemma_csm.config import GemmaCSMConfig
 from gemma_csm.dataset_opens2s import OpenS2SDataset, collate_opens2s
+from gemma_csm.dataset import CodesDataset, collate as collate_tts
 from gemma_csm.loader import load_gemma_csm_audio_in
 from gemma_csm.train import trainable_state_dict
 
@@ -65,6 +67,24 @@ def evaluate(model, val_items, audio_encode, tok, max_audio, max_frames,
     return (sum(c0s) / len(c0s), sum(dps) / len(dps)) if c0s else (float("nan"), float("nan"))
 
 
+def evaluate_tts(model, val_raw, tok, pad_id, max_n=64):
+    """Text->speech held-out c0/depth for TTS (CodesDataset) shards."""
+    model.eval()
+    c0s, dps = [], []
+    for it in val_raw[:max_n]:
+        text = f"[{it.get('speaker', 'lj')}] {it['text']}"
+        ids = torch.tensor(tok(text, add_special_tokens=True)["input_ids"], dtype=torch.long)
+        b = collate_tts([{"text_ids": ids, "codes": it["codes"]}], pad_id)
+        b = {k: v.cuda() for k, v in b.items()}
+        out = model(b)
+        c0s.append(float(out["loss_c0"]))
+        dps.append(float(out["loss_depth"]))
+    model.train()
+    if not c0s:
+        return float("nan"), float("nan")
+    return sum(c0s) / len(c0s), sum(dps) / len(dps)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--shard", nargs="+", required=True)
@@ -85,9 +105,14 @@ def main():
     p.add_argument("--max-text", type=int, default=96)
     p.add_argument("--grad-accum", type=int, default=16)
     p.add_argument("--keep-ckpts", type=int, default=3)
+    p.add_argument("--batch-size", type=int, default=1)
+    p.add_argument("--num-workers", type=int, default=0)
+    p.add_argument("--lr", type=float, default=None, help="override config lr (big-batch)")
     p.add_argument("--backbone-id", default="google/gemma-4-12B-it")
     p.add_argument("--no-audio-in", action="store_true",
                    help="Phase A: text->audio only (skip audio tower); heads learn to speak")
+    p.add_argument("--tts", action="store_true",
+                   help="train on TTS shards (CodesDataset text->speech); implies --no-audio-in")
     p.add_argument("--sample-every", type=int, default=0,
                    help="every N steps decode a few clips in-process (0=off)")
     p.add_argument("--sample-clips", type=int, default=3)
@@ -125,17 +150,31 @@ def main():
     shards = []
     for s in a.shard:
         shards += glob.glob(s)
-    ds = OpenS2SDataset(sorted(shards))
-    n_val = max(1, int(len(ds) * a.val_frac)) if len(ds) > 20 else 0
-    val_items = ds.items[len(ds) - n_val:] if n_val else []
-    ds.items = ds.items[:len(ds) - n_val] if n_val else ds.items
-    print(f"dataset: {len(ds)} train / {len(val_items)} val pairs", flush=True)
-
-    dl = DataLoader(
-        ds, batch_size=1, shuffle=True,
-        collate_fn=lambda b: collate_opens2s(b, tok, a.max_audio, a.max_frames, a.max_text),
-    )
-    opt = make_paged_opt(model, cfg.lr, a.depth_lr_mult)
+    shards = sorted(shards)
+    if a.tts:
+        a.no_audio_in = True
+        pad_id = tok.pad_token_id if tok.pad_token_id is not None else 0
+        ds = CodesDataset(shards, tok, max_frames=a.max_frames)
+        n_val = max(1, int(len(ds) * a.val_frac)) if len(ds) > 20 else 0
+        val_items = ds.items[len(ds) - n_val:] if n_val else []
+        ds.items = ds.items[:len(ds) - n_val] if n_val else ds.items
+        print(f"TTS dataset: {len(ds)} train / {len(val_items)} val (pad_id={pad_id})", flush=True)
+        dl = DataLoader(ds, batch_size=a.batch_size, shuffle=True,
+                        num_workers=a.num_workers,
+                        collate_fn=functools.partial(collate_tts, text_pad_id=pad_id))
+    else:
+        pad_id = None
+        ds = OpenS2SDataset(shards)
+        n_val = max(1, int(len(ds) * a.val_frac)) if len(ds) > 20 else 0
+        val_items = ds.items[len(ds) - n_val:] if n_val else []
+        ds.items = ds.items[:len(ds) - n_val] if n_val else ds.items
+        print(f"dataset: {len(ds)} train / {len(val_items)} val pairs", flush=True)
+        dl = DataLoader(
+            ds, batch_size=a.batch_size, shuffle=True, num_workers=a.num_workers,
+            collate_fn=functools.partial(collate_opens2s, tok=tok, max_audio=a.max_audio,
+                                         max_frames=a.max_frames, max_text=a.max_text),
+        )
+    opt = make_paged_opt(model, a.lr if a.lr is not None else cfg.lr, a.depth_lr_mult)
     if resume_opt is not None:
         try:
             opt.load_state_dict(resume_opt)
@@ -168,7 +207,11 @@ def main():
             _codec["c"] = MimiCodec(device="cuda")
         codec = _codec["c"]
         sdir = a.out / "samples"; sdir.mkdir(parents=True, exist_ok=True)
-        pool = [it.get("text", "").strip() for it in (val_items or ds.items)]
+        _src = val_items or ds.items
+        if a.tts:
+            pool = [f"[{it.get('speaker', 'lj')}] {it['text']}".strip() for it in _src]
+        else:
+            pool = [it.get("text", "").strip() for it in _src]
         prompts = [t for t in pool if 20 <= len(t) <= 160][:a.sample_clips]
         model.eval(); torch.cuda.empty_cache()
         try:
@@ -205,8 +248,11 @@ def main():
                       f"{(time.time() - t0) / max(step - start_step, 1):.2f}s/step", flush=True)
             step += 1
             if val_items and step % a.val_every == 0:
-                vc0, vd = evaluate(model, val_items, audio_encode, tok,
-                                   a.max_audio, a.max_frames, no_audio_in=a.no_audio_in, max_text=a.max_text)
+                if a.tts:
+                    vc0, vd = evaluate_tts(model, val_items, tok, pad_id)
+                else:
+                    vc0, vd = evaluate(model, val_items, audio_encode, tok,
+                                       a.max_audio, a.max_frames, no_audio_in=a.no_audio_in, max_text=a.max_text)
                 print(f"val {step}  c0 {vc0:.3f}  depth {vd:.3f}", flush=True)
             if step % a.eval_every == 0 or step >= a.steps:
                 save_ckpt(step)

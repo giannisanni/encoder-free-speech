@@ -28,6 +28,7 @@ Usage (stream a subset):
 import argparse
 import io
 import json
+import os
 import tarfile
 from pathlib import Path
 
@@ -39,10 +40,54 @@ from gemma_csm.codec import MimiCodec
 REPO = "CASIA-LM/OpenS2S_Datasets"
 QUERY_TAR = f"datasets/{REPO}/en_query_wav.tar.gz"
 RESP_TAR0 = f"datasets/{REPO}/en_response_wav.tar.gz.0"
+RESP_TARS = [f"datasets/{REPO}/en_response_wav.tar.gz.{i}" for i in range(7)]
 
 
 def _mono(data):
     return data.mean(-1) if data.ndim > 1 else data
+
+
+class _ChainedFile:
+    """Read a list of fsspec paths as one continuous byte stream (a tar.gz split
+    with `split` into .0,.1,... must be concatenated to decompress past .0)."""
+
+    def __init__(self, fs, paths):
+        self._fs = fs
+        self._paths = list(paths)
+        self._i = 0
+        self._fh = fs.open(self._paths[0], "rb")
+
+    def _advance(self):
+        if self._i < len(self._paths) - 1:
+            self._i += 1
+            try:
+                self._fh.close()
+            except Exception:
+                pass
+            self._fh = self._fs.open(self._paths[self._i], "rb")
+            return True
+        return False
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            chunks = [self._fh.read()]
+            while self._advance():
+                chunks.append(self._fh.read())
+            return b"".join(chunks)
+        out = bytearray()
+        while len(out) < size:
+            chunk = self._fh.read(size - len(out))
+            if chunk:
+                out += chunk
+            elif not self._advance():
+                break
+        return bytes(out)
+
+    def close(self):
+        try:
+            self._fh.close()
+        except Exception:
+            pass
 
 
 def _stream_first(fs, path, k, skip=0):
@@ -142,6 +187,130 @@ def prepare_stream(out_dir: Path, n_pairs: int, shard_size: int = 1000,
     print(f"done: {n_done} encoded, {n_skip} skipped", flush=True)
 
 
+def prepare_stream_full(out_dir: Path, target: int, shard_size: int = 1000,
+                        device: str = "cpu", backbone_id: str = "google/gemma-4-12B-it",
+                        max_seconds: float = 20.0, shard_start: int = 0):
+    """Add `target` NEW pairs disjoint from existing shards, reading ALL response
+    pieces. Single pass, bounded RAM (holds ~target*1.5 response + target query)."""
+    import glob as _glob
+    from huggingface_hub import HfFileSystem, hf_hub_download
+    from transformers import AutoProcessor
+
+    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+
+    seen = set()
+    for sf_path in _glob.glob(str(out_dir / "opens2s_en_*.pt")):
+        try:
+            for it in torch.load(sf_path, weights_only=True):
+                seen.add(int(it["index"]))
+        except Exception:
+            pass
+    print(f"already have {len(seen)} pairs; targeting +{target} new", flush=True)
+
+    mpath = hf_hub_download(REPO, "manifest_en.jsonl", repo_type="dataset")
+    meta = {}
+    with open(mpath) as fh:
+        for line in fh:
+            d = json.loads(line); meta[int(d["index"])] = d
+    print(f"manifest: {len(meta)} pairs total", flush=True)
+
+    fs = HfFileSystem()
+    cand = int(target * 1.5)
+    print(f"streaming response (all {len(RESP_TARS)} pieces) for up to {cand} new ...", flush=True)
+    rw = {}
+    ch = _ChainedFile(fs, RESP_TARS)
+    tf = tarfile.open(fileobj=ch, mode="r|gz")
+    for m in tf:
+        if not m.isfile() or not m.name.endswith(".wav"):
+            continue
+        try:
+            idx = int(Path(m.name).stem)
+        except ValueError:
+            continue
+        if idx in seen or idx not in meta:
+            continue
+        rw[idx] = tf.extractfile(m).read()
+        if len(rw) % 1000 == 0:
+            print(f"  ...{len(rw)} new response wavs", flush=True)
+        if len(rw) >= cand:
+            break
+    tf.close(); ch.close()
+    print(f"  collected {len(rw)} new response wavs", flush=True)
+
+    want = set(rw); qw = {}
+    print("streaming query for those indices ...", flush=True)
+    fs = HfFileSystem()  # fresh client: pass-1 handle closes kill the shared one
+    qf = fs.open(QUERY_TAR, "rb")
+    qtf = tarfile.open(fileobj=qf, mode="r|gz")
+    for m in qtf:
+        if not m.isfile() or not m.name.endswith(".wav"):
+            continue
+        try:
+            idx = int(Path(m.name).stem)
+        except ValueError:
+            continue
+        if idx in want:
+            try:
+                qw[idx] = qtf.extractfile(m).read()
+            except Exception as e:
+                print(f"  query read skip {idx}: {type(e).__name__}", flush=True)
+                continue
+            if len(qw) % 1000 == 0:
+                print(f"  ...{len(qw)} query matched", flush=True)
+            if len(qw) >= len(want):
+                break
+    qtf.close(); qf.close()
+    print(f"  matched {len(qw)} query wavs", flush=True)
+
+    proc = AutoProcessor.from_pretrained(backbone_id)
+    codec = MimiCodec(device=device)
+    items, n_shard, n_done, n_skip = [], shard_start, 0, 0
+
+    def flush():
+        nonlocal items, n_shard
+        if items:
+            dst = out_dir / f"opens2s_en_{n_shard:03d}.pt"
+            tmp = out_dir / f"opens2s_en_{n_shard:03d}.pt.tmp"
+            torch.save(items, tmp); os.replace(tmp, dst)
+            print(f"wrote {dst.name} ({len(items)})", flush=True)
+            items, n_shard = [], n_shard + 1
+
+    for idx in list(qw):
+        if n_done >= target:
+            break
+        d = meta[idx]
+        rdata, rsr = sf.read(io.BytesIO(rw[idx]), dtype="float32")
+        rdata = _mono(rdata)
+        if len(rdata) > max_seconds * rsr:
+            n_skip += 1
+            continue
+        ev = codec.encode.__code__.co_varnames
+        codes = (codec.encode(torch.from_numpy(rdata), sample_rate=rsr)
+                 if "sample_rate" in ev else codec.encode(torch.from_numpy(rdata)))
+        qdata, qsr = sf.read(io.BytesIO(qw[idx]), dtype="float32")
+        feat = proc(audio=_mono(qdata), sampling_rate=qsr, return_tensors="pt")
+        input_features = None
+        for kk in ("input_features", "audio_values", "input_audio_embeds"):
+            if kk in feat:
+                input_features = feat[kk]
+                break
+        if input_features is None:
+            raise KeyError(f"no audio features; keys: {list(feat.keys())}")
+        items.append({
+            "index": idx,
+            "input_features": input_features.squeeze(0).to(torch.float16),
+            "codes": codes,
+            "text": d["response"].get("text", ""),
+            "query_text": d["query"].get("text", ""),
+            "emotion": d["query"].get("emotion") or d["response"].get("emotion"),
+        })
+        n_done += 1
+        if len(items) >= shard_size:
+            flush()
+    flush()
+    print(f"done: {n_done} encoded, {n_skip} skipped (over-long)", flush=True)
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--stream", action="store_true",
@@ -152,10 +321,16 @@ if __name__ == "__main__":
     p.add_argument("--backbone-id", default="google/gemma-4-12B-it")
     p.add_argument("--skip", type=int, default=0, help="skip first N wavs (grow disjointly)")
     p.add_argument("--shard-start", type=int, default=0, help="start shard numbering here")
+    p.add_argument("--full", action="store_true",
+                   help="read ALL response pieces, dedupe vs existing shards, add --target new")
+    p.add_argument("--target", type=int, default=5000, help="new pairs to add in --full mode")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = p.parse_args()
-    if a.stream:
+    if a.full:
+        prepare_stream_full(a.out, a.target, a.shard_size, a.device, a.backbone_id,
+                            shard_start=a.shard_start)
+    elif a.stream:
         prepare_stream(a.out, a.n_pairs, a.shard_size, a.device, a.backbone_id,
                        skip=a.skip, shard_start=a.shard_start)
     else:
-        raise SystemExit("only --stream mode is supported (EN wavs are ~88GB)")
+        raise SystemExit("use --full (recommended) or --stream")
