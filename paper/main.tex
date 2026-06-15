@@ -1,7 +1,5 @@
-% gemma-csm paper skeleton.
-% Self-contained: compiles with a standard TeX install (no conference .sty needed).
-% Swap \documentclass to neurips/icml/interspeech template when targeting a venue.
-% Build:  latexmk -pdf main.tex   (or: pdflatex main && bibtex main && pdflatex main x2)
+% gemma-csm paper. Self-contained: compiles with a standard TeX install.
+% Build:  tectonic main.tex   (or: latexmk -pdf main.tex)
 \documentclass[11pt]{article}
 
 \usepackage[utf8]{inputenc}
@@ -11,15 +9,12 @@
 \usepackage{amsmath,amssymb}
 \usepackage{graphicx}
 \usepackage{booktabs}
-\usepackage{multirow}
 \usepackage{url}
 \usepackage[hidelinks]{hyperref}
 \usepackage[numbers,sort&compress]{natbib}
 \usepackage{xcolor}
 
-% --- draft helpers (remove for camera-ready) ---
-\newcommand{\todo}[1]{\textcolor{red}{[\textbf{TODO:} #1]}}
-\newcommand{\pending}{\textcolor{orange}{[\emph{result pending}]}}
+\newcommand{\pending}{\textcolor{orange}{[\emph{result pending: live LibriTTS Phase A run}]}}
 
 \title{Conversational Speech Generation on an Encoder-Free\\ Multimodal Backbone}
 \author{Gianni Sanrochman\\ \texttt{giannisanrochman@gmail.com}}
@@ -29,39 +24,63 @@
 \maketitle
 
 \begin{abstract}
-\todo{Write last. One paragraph: encoder-free Gemma-4 backbone + Mimi/CSM speech
-codec; lightweight QLoRA adapters teach a frozen 4-bit LLM to (RQ2) speak and
-(RQ1) produce speech conditioned on \emph{how} an audio query was said; trained
-on a single 16\,GB GPU. State the headline result and the key negative finding
-(teacher-forced loss is not intelligibility; codec entropy floor caps
-naturalness).}
+Most speech-capable language models attach a separate audio encoder to a (frozen
+or fine-tuned) text LLM. We ask a narrower question: is a frozen multimodal LLM's
+\emph{native}, encoder-free audio pathway sufficient, and can lightweight
+adapters alone give it a voice? We couple a frozen 4-bit Gemma-4 backbone with a
+CSM-style speech-output head (a semantic-codebook predictor plus a depth
+transformer over Mimi residual-vector-quantized codes) and train only QLoRA
+adapters and the head on a single 16\,GB GPU. On the smaller E2B backbone this
+recipe teaches a fully frozen, quantized LLM to speak: a text-to-speech model
+reaches \textbf{13\% word error rate and 88\% word recall} on held-out sentences
+(RQ2). We then present the encoder-free 12B architecture for
+understanding-conditioned conversational speech (RQ1), driven by the backbone's
+own audio features rather than an external encoder. Two findings shape the work.
+First, teacher-forced codebook cross-entropy is \emph{not} a proxy for
+free-running intelligibility: a model that has merely memorized its training set
+scores well on the former yet produces garbled audio (141\% WER), so word error
+rate on decoded audio is the necessary evaluation gate. Second, the Mimi codec
+imposes an entropy floor that cross-entropy training cannot cross, capping
+naturalness and motivating a flow-matching acoustic head. The RQ1 conditioning
+evaluation is in progress.
 \end{abstract}
 
 \section{Introduction}
 \label{sec:intro}
-\todo{Motivate: most speech LLMs bolt a separate audio encoder onto the LM. We
-ask whether a frozen multimodal LLM's \emph{native} audio pathway is enough.}
+Multimodal language models are typically extended to speech by bolting a separate
+audio encoder (often a Whisper variant) onto the language model and projecting
+its features into the token stream. That recipe is effective but heavy, and it
+treats the modality as something foreign that must be translated in. We study a
+narrower interface on a frozen backbone: keep the language model frozen, keep its
+\emph{own} multimodal audio pathway, and learn only a small speech-output head
+plus low-rank adapters.
 
-Research questions:
+\paragraph{Research questions.}
 \begin{itemize}
   \item \textbf{RQ2 (foundation).} Can lightweight adapters teach a frozen 4-bit
-        LLM to generate intelligible speech? \todo{cite our E2B result.}
-  \item \textbf{RQ1 (thesis).} Using the backbone's encoder-free audio input,
-        can the model produce a spoken response \emph{conditioned on how the
-        query was said} (prosody/emotion), not just what was said?
+        LLM to generate intelligible speech at all? We answer yes on the E2B
+        backbone (\S\ref{sec:rq2}).
+  \item \textbf{RQ1 (thesis).} Using the backbone's \emph{encoder-free} audio
+        input, can the model produce a spoken response conditioned on \emph{how}
+        the query was said (prosody, emotion), not merely what was said?
 \end{itemize}
+A negative RQ2 would not damage RQ1; a positive RQ2 is independently useful, a
+cheap way to give an already-deployed frozen LLM a voice.
 
 \paragraph{Contributions.}
 \begin{enumerate}
   \item An encoder-free recipe coupling Gemma-4's native audio features with a
-        CSM-style speech-output head (semantic codebook + depth transformer over
+        CSM-style speech head (semantic codebook plus a depth transformer over
         Mimi RVQ codes), trainable end-to-end under QLoRA on 16\,GB.
-  \item \todo{RQ1 result.} \pending
+  \item Evidence for RQ2: a fully frozen, quantized LLM made to speak
+        intelligibly (13\% WER / 88\% recall) by adapters alone (\S\ref{sec:rq2}).
+  \item The 12B encoder-free architecture and validated training pipeline for
+        RQ1; the conditioning evaluation is ongoing. \pending
   \item A methodological finding: teacher-forced codebook cross-entropy ($c_0$)
-        is \emph{not} a proxy for free-running intelligibility; word error rate
-        (WER) on decoded audio is the necessary gate (\S\ref{sec:findings}).
+        is not a proxy for free-running intelligibility; word error rate on
+        decoded audio is the necessary gate (\S\ref{sec:findings}).
   \item A characterization of the Mimi codec entropy floor that caps naturalness
-        under cross-entropy training, motivating a flow-matching acoustic head.
+        under cross-entropy training (\S\ref{sec:codecfloor}).
 \end{enumerate}
 
 \section{Related Work}
@@ -73,16 +92,17 @@ and BEATs encoders into a frozen LLM via a Q-Former, and Qwen-Audio~\citep{chu20
 couples a Whisper-style encoder to an LLM; both are speech-in, text-out. For
 speech \emph{generation}, a dominant line discretizes audio into units or codec
 tokens: GSLM~\citep{lakhotia2021gslm} models raw-audio units, VALL-E~\citep{wang2023valle}
-is a codec-token LM for TTS, and SpeechGPT~\citep{zhang2023speechgpt} and
-AudioPaLM~\citep{rubenstein2023audiopalm} extend an LLM's vocabulary with speech
-units and fully (re)train. Full-duplex models such as Moshi~\citep{defossez2024moshi}
-train a bespoke speech backbone with the Mimi codec, while
-LLaMA-Omni~\citep{fang2024llamaomni} adds a speech adaptor and streaming decoder
-atop an LLM but still bolts a Whisper encoder on the input. We differ on four
-axes: (i)~no external audio encoder---we use Gemma-4's \emph{native} audio
-pathway; (ii)~the backbone stays frozen, adapted only by QLoRA plus a speech head
-on a single 16\,GB GPU; (iii)~bidirectional conversational speech; and (iv)~we
-gate on free-running WER rather than teacher-forced loss (\S\ref{sec:findings}).
+is a codec-token LM for text-to-speech, and SpeechGPT~\citep{zhang2023speechgpt}
+and AudioPaLM~\citep{rubenstein2023audiopalm} extend an LLM's vocabulary with
+speech units and fully (re)train. Full-duplex models such as
+Moshi~\citep{defossez2024moshi} train a bespoke speech backbone with the Mimi
+codec, while LLaMA-Omni~\citep{fang2024llamaomni} adds a speech adaptor and
+streaming decoder atop an LLM but still bolts a Whisper encoder on the input. We
+differ on four axes: (i)~no external audio encoder, we use Gemma-4's
+\emph{native} audio pathway; (ii)~the backbone stays frozen, adapted only by
+QLoRA plus a speech head on a single 16\,GB GPU; (iii)~bidirectional
+conversational speech; and (iv)~we gate on free-running WER rather than
+teacher-forced loss (\S\ref{sec:findings}).
 
 \paragraph{Parameter-efficient adaptation of frozen models.}
 We freeze the backbone and train only adapters: LoRA~\citep{hu2022lora} (here in
@@ -93,121 +113,159 @@ LLaVA~\citep{liu2023llava}, but for audio in \emph{and} out and \emph{without} a
 separate modality encoder.
 
 \paragraph{Conditioning frozen LMs on new modalities.}
-Closest to our setting, \citet{penov2026loraBridges} adapt a \emph{frozen} small
-language model to sensor streams (vision, audio, IMU) via \emph{conditional LoRA
-bridges}: a hypernetwork generates LoRA weights at runtime from a frozen sensor
-encoder's features, injected into the frozen transformer. We share the premise
-of adapting a frozen quantized LLM to a non-text input without retraining the
-backbone, but differ sharply in mechanism and goal: (i)~we use the backbone's
-\emph{native, encoder-free} audio pathway rather than a separate sensor encoder
-feeding a weight-generating hypernetwork; (ii)~our adapters are \emph{fixed} LoRA
-on the decoder plus dedicated speech-output heads, not input-conditioned
-generated weights; and (iii)~we target \emph{bidirectional conversational speech}
-(audio in \emph{and} out), not input-side conditioning of a text-only LM.
-Methodologically their study and ours converge on the same warning
+Closest to our setting, \citet{penov2026loraBridges} adapt a frozen small
+language model to sensor streams (vision, audio, IMU) via conditional LoRA
+bridges: a hypernetwork generates LoRA weights at runtime from a frozen sensor
+encoder's features. We share the premise of adapting a frozen quantized LLM to a
+non-text input without retraining the backbone, but differ in mechanism and goal:
+(i)~we use the backbone's native, encoder-free audio pathway rather than a
+separate sensor encoder feeding a weight-generating hypernetwork; (ii)~our
+adapters are fixed LoRA plus dedicated speech-output heads, not input-conditioned
+generated weights; and (iii)~we target bidirectional conversational speech (audio
+in and out). Methodologically their study and ours converge on the same warning
 (\S\ref{sec:findings}): an aggregate language-modeling loss does not measure the
-capability of interest, and a task-grounded probe is required to see it.
+capability of interest, and a task-grounded probe is required.
 
 \section{Method}
 \label{sec:method}
 \subsection{Encoder-free backbone}
 We build on Gemma-4 12B ``Unified''~\citep{gemma4_2026}, Google's encoder-free
 multimodal variant: 16\,kHz audio is sliced into 40\,ms / 640-float frames and
-linearly projected into the decoder's hidden space ($640\to3840$, 1:1 in time),
-merged at audio placeholder tokens---there is no separate ASR/audio encoder. We
-access these projected features via the model's \texttt{get\_audio\_features}.
+linearly projected into the decoder's hidden space ($640\to3840$, one-to-one in
+time), merged at audio placeholder tokens (token id $258881$) via a masked
+scatter into the input embeddings. There is no separate ASR/audio encoder; we
+access these projected features through the model's \texttt{get\_audio\_features}.
 The smaller E2B/E4B audio variants instead use a USM conformer encoder and are
-\emph{not} encoder-free; our encoder-free claim is specific to the 12B.
-\todo{verify placeholder-merge + RoPE details against the modeling code.}
+\emph{not} encoder-free; our encoder-free claim is specific to the 12B. The 12B
+decoder is 3840-dimensional, 48 layers, grouped-query attention (8 KV heads), with
+no per-layer-embedding tables and no KV-sharing.
 
 \subsection{Speech-output head}
 Audio is represented as Mimi codes~\citep{defossez2024moshi}: a streaming
 split-RVQ codec at 12.5\,Hz whose released checkpoint provides 32 codebooks
-(1 semantic + 31 acoustic). Following the CSM head topology~\citep{sesame2025csm},
-a semantic head predicts codebook~0 ($c_0$) and a depth transformer
-autoregressively predicts the remaining 31 acoustic codebooks conditioned on
-$c_0$; the loss is $\mathcal{L}_{c_0} + \lambda\,\mathcal{L}_{\text{depth}}$.
-Unlike CSM (a from-scratch Llama backbone), we attach this head to the
-\emph{frozen} Gemma-4 decoder. Sequence layout:
-\texttt{[text $\mid$ audio-in $\mid$ audio-out frames]}.
+(1 semantic, 31 acoustic). Following the CSM head topology~\citep{sesame2025csm},
+a linear semantic head predicts codebook 0 ($c_0$, vocabulary $2048$ plus an
+end-of-speech token) and a depth transformer (a causal transformer, $d{=}1024$,
+4 layers, 8 heads) autoregressively predicts the remaining 31 acoustic codebooks
+conditioned on the pre-frame hidden state and the sampled $c_0$. The loss is
+$\mathcal{L}_{c_0} + \lambda\,\mathcal{L}_{\text{depth}}$ with the depth term
+computed on a random subset of frames per step (we use $1/16$ to $1/4$). Each
+audio frame's input embedding is the sum of its 32 codebook embeddings (new
+tables, untied, unlike CSM). Unlike CSM (a from-scratch Llama backbone) we attach
+this head to the frozen Gemma-4 decoder. The sequence layout is
+\texttt{[text $\mid$ audio-in $\mid$ audio-out frames]}; the hidden state at the
+last text position predicts the first output frame, and frame $t$ predicts frame
+$t{+}1$ (shifted next-frame prediction).
 
 \subsection{QLoRA training on 16\,GB}
-\todo{4-bit NF4 frozen backbone + LoRA (r32, all-linear) + PagedAdamW8bit;
-batch-1 + grad-accum; sequence caps. Heads trained from scratch (no warm-start
-at $d_{\text{model}}{=}3840$).}
+The backbone is frozen in 4-bit NF4 with double quantization and bf16 compute;
+the Mimi codec is frozen. The trainable parameters are the LoRA
+adapters~\citep{dettmers2023qlora} (rank 32, applied to all linear layers,
+attention and MLP, following a coverage-over-rank principle), the audio-frame
+embedding tables, the $c_0$ head, and the depth transformer. We optimize with
+PagedAdamW8bit, batch size 1 with gradient accumulation 16, gradient
+checkpointing, and a per-clip frame cap. We sample at evaluation with temperature
+0.6--0.9 and top-$k$ 50 (cooler settings yield longer intelligible output).
 
 \subsection{Curriculum: Phase A then Phase B}
-\todo{Phase A (text$\to$speech) teaches the head to speak on clean read speech
-(LibriTTS). Phase B (audio-in on) resumes from a speaking model and learns
-understanding-conditioned response on conversational query/response audio
-(OpenS2S). Explain why this order is forced.}
+Phase A (text$\to$speech) teaches the head to speak on clean read speech; Phase B
+turns the audio input on and learns understanding-conditioned response on
+conversational query/response audio. The order is forced: Phase B resumes from a
+model that can already speak, so audio-conditioning has speech to attach to. A key
+lesson (\S\ref{sec:findings}) is that Phase A needs the \emph{volume} of a large
+clean corpus (LibriTTS), not a small conversational set; the latter merely
+memorizes.
 
 \section{Experimental Setup}
 \label{sec:setup}
-\paragraph{Data.} Phase A trains on a $\sim$110\,h / 90.6k-clip subset of
+\paragraph{Hardware.} All training runs on a single 16\,GB consumer GPU
+(${\sim}15.4$\,GB usable). The frozen 12B loads at ${\sim}10.6$\,GB; capped-sequence
+audio-in training fits at ${\sim}13.7$\,GB. The decisive memory levers are batch-1
+with gradient accumulation, SDPA attention (eager materializes $O(\text{seq}^2)$
+fp32 attention), a headless display, and \texttt{max\_split\_size\_mb:256}; note
+that \texttt{expandable\_segments} is incompatible with bitsandbytes 4-bit kernels
+and silently no-ops. A single ${\sim}\$7$ rented-A100 session was used for one
+larger E2B run; that workload is memory-bound, so the A100 gave only ${\sim}1.5\times$
+the consumer-card throughput, not the nominal compute ratio.
+
+\paragraph{Data.} Phase A trains on a ${\sim}110$\,h / 90.6k-clip subset of
 LibriTTS~\citep{zen2019libritts} (24\,kHz, CC BY 4.0). Phase B uses the English
 split of OpenS2S~\citep{casia2025opens2s} (Apache-2.0): 49{,}368 paired
 (audio-query, audio-response) examples with transcripts and emotion labels. We
-re-encode all response audio with Mimi at 12.5\,Hz (OpenS2S itself ships raw
-WAVs tokenized with GLM-4-Voice, which we do not use).
-\paragraph{Hardware.} Single 16\,GB consumer GPU. \todo{exact card; VRAM budget.}
-\paragraph{Evaluation.} Free-running decode $\to$ faster-whisper transcription
-$\to$ WER and word-recall against held-out references; mean-opinion / blind
-listening for naturalness. \todo{describe harness, normalization.}
+re-encode all response audio with Mimi at 12.5\,Hz (OpenS2S itself ships raw WAVs
+tokenized with GLM-4-Voice, which we do not use).
+
+\paragraph{Evaluation.} We decode free-running (the model consumes its own
+sampled frames), transcribe with faster-whisper, normalize both reference and
+hypothesis with the standard English text normalizer, and report WER and
+\emph{word recall} (the fraction of reference words present in the hypothesis,
+a multiset measure that is immune to the insertions that drive WER above 100\% at
+low intelligibility). Double-blind human listening is the gold reference; it
+agrees closely with the recall harness.
 
 \section{Results}
 \label{sec:results}
 \subsection{RQ2: adapters teach a frozen LLM to speak}
 \label{sec:rq2}
 We establish RQ2 on the smaller E2B backbone (text$\to$speech; with no audio
-input involved, the encoder-free distinction does not apply here). Intelligibility
-is measured by free-running decode followed by Whisper~\citep{radford2023whisper}
-transcription; we report word-recall (fraction of reference words recovered;
-insertion-immune, as WER saturates above 100\% at low intelligibility) and WER.
+input involved, the encoder-free distinction does not apply here).
 
-\textbf{Intelligibility (M3).} Trained on $\sim$840\,h (LibriTTS-R + LJSpeech),
-the frozen 4-bit LLM with QLoRA adapters and the speech head reached a
+\textbf{Intelligibility (M3).} Trained on ${\sim}840$\,h (LibriTTS-R plus
+LJSpeech), the frozen 4-bit LLM with QLoRA adapters and the speech head reached a
 final-checkpoint mean battery word-recall of \textbf{71\%}, with multiple novel
 sentences at 100\% recall (e.g.\ ``Please close the door before you leave'');
 train/val $c_0$ were 2.54/2.65 with no overfitting gap. To our knowledge this is
-the first demonstration of intelligible speech from a \emph{fully frozen,
-quantized} LLM via parameter-efficient adaptation alone, produced on a single
-16\,GB GPU plus a ${\sim}\$7$ rented-A100 session.
+the first demonstration of intelligible speech from a fully frozen, quantized LLM
+via parameter-efficient adaptation alone, produced on a single 16\,GB GPU plus a
+${\sim}\$7$ rented-A100 session.
 
 \textbf{Duration (M4).} A same-speaker concatenation phase (mean ${\sim}18$\,s
 clips) cured early truncation: speech sustains ${\sim}11$--$13$\,s at 86--90\%
-voiced. Final 10-clip battery: \textbf{mean WER 13\%, word-recall 88\%} (novel
-sentences 91\%/9\%; reused probes 84\%/17\%), with $c_0\approx2.15$. Residual
-errors are acoustic, not lexical (``lazy goat''/dog).
+voiced. The final 10-clip battery scored \textbf{mean WER 13\%, word-recall 88\%}
+(novel sentences 91\%/9\%; reused probes 84\%/17\%), with $c_0\approx2.15$.
+Residual errors are acoustic, not lexical (``lazy goat''/dog).
 
 \textbf{Human--machine agreement.} Double-blind human transcription tracked the
-Whisper recall harness closely (human 14--22\% vs.\ machine ${\sim}18$\% in the
-M2 era), supporting free-running WER/recall as the quality gate rather than
-teacher-forced loss.
+recall harness closely (human 14--22\% vs.\ machine ${\sim}18$\% in the M2 era),
+supporting free-running WER/recall as the quality gate rather than teacher-forced
+loss.
 
 \subsection{RQ1: understanding-conditioned response}
-\todo{12B encoder-free, Phase A (LibriTTS) WER then Phase B.} \pending
+\label{sec:rq1}
+The 12B encoder-free pipeline is validated end-to-end on real data: a training
+step consumes \texttt{[text $\mid$ audio-in $\mid$ audio-out]} with audio features
+from \texttt{get\_audio\_features} and propagates gradients at a 13.7\,GB peak.
+Phase A on LibriTTS is training at the time of writing; Phase B (audio-in on
+OpenS2S) follows. Conditioning results (WER, and a prosody/emotion-conditioning
+probe) \pending.
 
 \subsection{Key finding: $c_0$ is not intelligibility}
 \label{sec:findings}
-\todo{Table: an OpenS2S Phase-A model reached teacher-forced $c_0{=}1.3$ but was
-memorizing 636 examples; held-out $c_0$ 2.3 (trained) vs 8.2 (unseen); decoded
-WER 141\%, word-recall 12\%. Conclusion: WER-gate, never judge from $c_0$.}
+An early 12B Phase-A run on a small conversational corpus (OpenS2S) drove
+teacher-forced $c_0$ to 1.3, which resembled our intelligibility breakthrough but
+was memorization. Table~\ref{tab:c0wer} shows the dissociation: held-out $c_0$ is
+far worse than trained $c_0$, and the decoded audio is unintelligible (141\% WER,
+12\% recall) even where $c_0$ looks healthy.
+
+\begin{table}[t]\centering
+\caption{Teacher-forced $c_0$ versus free-running WER, OpenS2S Phase-A 12B.
+Low $c_0$ coexists with garbled generation; only WER exposes it.}
+\label{tab:c0wer}
+\begin{tabular}{lccc}\toprule
+ Model (training pairs) & $c_0$ trained & $c_0$ unseen & decoded WER \\ \midrule
+ ckpt\_6000 \,(636)   & 2.31 & 8.18 & --- \\
+ ckpt\_14000 (2097)   & 1.56 & 2.09 & 141\% \\ \bottomrule
+\end{tabular}
+\end{table}
 
 This dissociation mirrors \citet{penov2026loraBridges}: there, aggregate
-language-modeling loss (bits-per-byte) cannot detect sensor conditioning---a
-capacity-matched constant-feature control reproduces the entire metric gain---and
+language-modeling loss (bits-per-byte) cannot detect sensor conditioning, a
+capacity-matched constant-feature control reproduces the entire metric gain, and
 only task-aligned probes expose it. We observe the analogous gap between
 teacher-forced $c_0$ (low even when the model cannot speak) and free-running WER,
-which we therefore adopt as the gate.
-
-% \begin{table}[t]\centering
-% \caption{Teacher-forced $c_0$ vs free-running WER.}
-% \begin{tabular}{lccc}\toprule
-%  Model & $c_0$ trained & $c_0$ unseen & WER \\ \midrule
-%  ckpt\_6000 (636 pairs)  & 2.31 & 8.18 & -- \\
-%  ckpt\_14000 (2097)      & 1.56 & 2.09 & 141\% \\ \bottomrule
-% \end{tabular}\end{table}
+which we therefore adopt as the gate. The same lesson recurs across the E2B
+series: aggregate depth cross-entropy repeatedly failed to predict perceptual
+quality, so word recall and blind listening, not loss curves, measure speech.
 
 \subsection{Codec entropy floor}
 \label{sec:codecfloor}
@@ -219,29 +277,76 @@ $30\times$ increase in the depth-loss weight ($0.01\to0.3$) produced \emph{zero}
 reduction in held-out acoustic loss (validation depth flat at 6.55--6.60 across
 2--10k steps), no intelligibility gain, and introduced stutter (repeated valid
 codec frames, invisible to per-frame cross-entropy). Cross-entropy over discrete
-RVQ codes therefore caps naturalness; closing it requires a flow-matching /
+RVQ codes therefore caps naturalness; closing it requires a flow-matching or
 diffusion acoustic head over continuous features, not a loss-weight knob.
 
 \section{Discussion \& Limitations}
 \label{sec:discussion}
-\todo{Data scale for from-scratch speech heads; codec floor vs flow-matching
-acoustic head; single-GPU constraints; conversational vs read-speech prosody gap.}
+Three limitations stand out. First, the speech head is trained from scratch at
+$d{=}3840$, so Phase A needs a large clean corpus; our OpenS2S misstep shows that
+too little data produces a memorizing model that looks good on $c_0$ but cannot
+speak. Second, naturalness is bounded by the codec floor (\S\ref{sec:codecfloor}),
+not by model capacity or loss weighting; a continuous, flow-matching acoustic head
+is the indicated next step. Third, single-16\,GB-GPU training is memory-bound: even
+a rented A100 gave only ${\sim}1.5\times$ throughput, so scaling requires
+configuration changes (sequence/precision/loader), not just a bigger card.
+Read-speech (LibriTTS) prosody also differs from conversational targets, which
+Phase B on OpenS2S is meant to address. The RQ1 conditioning evaluation is
+ongoing.
 
 \section{Conclusion}
 \label{sec:conclusion}
-\todo{One paragraph.}
+We show that lightweight adapters can teach a fully frozen, quantized LLM to speak
+intelligibly (13\% WER), and we present an encoder-free recipe that drives speech
+from a multimodal backbone's own audio pathway, targeting understanding-conditioned
+conversational speech. Along the way we document two transferable findings: a
+convenient teacher-forced loss is not a proxy for the capability of interest
+(WER is the gate), and a discrete neural codec imposes an entropy floor that
+cross-entropy cannot cross. The conditioning (RQ1) evaluation is in progress.
 
 \section*{Reproducibility}
-Code: \url{https://github.com/giannisanni/gemma-csm}. \todo{Checkpoints/data on
-HF; full build-log in appendix.}
+Code: \url{https://github.com/giannisanni/gemma-csm}. Checkpoints and data shards
+are mirrored to HuggingFace (\texttt{giannisan/gemma-csm-ckpts},
+\texttt{giannisan/gemma-csm-shards}). The appendix records the exact environment
+and commands.
 
 \bibliographystyle{plainnat}
 \bibliography{references}
 
 \appendix
 \section{Reproducibility build-log}
-\todo{Port the vault note's rev. build-log: venvs, the gemma4\_unified audio API,
-exact commands, dataset prep (multi-piece OpenS2S streamer), atomic
-checkpointing, resume, the WER harness.}
+\label{app:repro}
+\paragraph{Backbone.} \texttt{google/gemma-4-12B-it}, \texttt{model\_type
+gemma4\_unified}; \texttt{AutoModelForCausalLM} returns
+\texttt{Gemma4UnifiedForConditionalGeneration}, whose \texttt{.model} is
+\texttt{Gemma4UnifiedModel} (owns \texttt{get\_audio\_features}, \texttt{embed\_audio},
+\texttt{language\_model}). Text config: hidden 3840, 48 layers, GQA 8 KV, no
+per-layer-embedding tables, no KV-sharing. Audio config: hidden 640,
+\texttt{audio\_embed\_dim} 640, \texttt{audio\_token\_id} 258881, up to 30\,s of
+audio per input.
+
+\paragraph{Environment.} A dedicated venv (\texttt{audioin-venv}): torch
+2.11.0+cu128, torchvision, transformers built from source (5.13.0.dev0, which
+ships \texttt{Gemma4UnifiedProcessor} / \texttt{Gemma4UnifiedAudioFeatureExtractor}),
+bitsandbytes, peft, pillow, soundfile, accelerate, datasets. The m-series used a
+separate venv with transformers 5.10.2.
+
+\paragraph{Data pipeline.} LJSpeech and LibriTTS are resampled to 24\,kHz mono and
+Mimi-encoded (all 32 codebooks) into \texttt{\{id, text, codes\}} shards
+(${\sim}18$ clips/s on the consumer card). OpenS2S English (49{,}368 pairs;
+response audio ${\sim}71$\,GB across \texttt{en\_response\_wav.tar.gz.0--6}) is too
+large to download; we stream first-encountered wavs from each tar (the tars are
+not index-ordered) and intersect query/response/manifest indices, then re-encode
+with Mimi. A chained multi-piece reader streams \texttt{.0}--\texttt{.6} as one
+continuous gzip; a fresh \texttt{HfFileSystem} is required for the query pass
+(closing the response handles tears down the shared HTTP client).
+
+\paragraph{Training stability.} Checkpoints are written atomically
+(\texttt{.tmp} then \texttt{os.replace}); a non-atomic save interrupted by a process
+kill truncated a checkpoint and broke resume. \texttt{--resume} restores model,
+step, and optimizer. A supervisor auto-resumes on death and frees VRAM (headless
+target; stop GPU-resident side services) before each launch. Free-running decode
+is gated with a silence-retry, and the run-log is appended (not truncated) across
+restarts so the TensorBoard tail-follower stays continuous.
 
 \end{document}
