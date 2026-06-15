@@ -34,3 +34,13 @@ m0a.log
 # editor backups
 *.bak
 *.bak2
+
+# latex build artifacts
+paper/main.pdf
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.log
+paper/*.out
+paper/*.fls
+paper/*.fdb_latexmk
