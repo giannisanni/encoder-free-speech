@@ -23,11 +23,16 @@ from transformers.models import gemma4_unified  # must import or 12B won't load
 print("transformers", transformers.__version__, "+ gemma4_unified OK")
 PY
 
-echo "=== [2/4] code (current snapshot from HF) ==="
-mkdir -p ~/gemma-csm && cd ~/gemma-csm
-hf download giannisan/gemma-csm-ckpts code/gemma-csm-code.tar.gz --local-dir /tmp/code
-tar xzf /tmp/code/code/gemma-csm-code.tar.gz -C ~/gemma-csm
-mkdir -p .venv/bin && ln -sf "$(which python)" .venv/bin/python
+echo "=== [2/4] code (current from GitHub; private repo needs GH_TOKEN) ==="
+if [ -n "${GH_TOKEN:-}" ]; then
+  git clone "https://${GH_TOKEN}@github.com/giannisanni/gemma-csm" ~/gemma-csm
+else
+  echo "WARN: no GH_TOKEN set; falling back to (possibly stale) HF code tarball"
+  mkdir -p ~/gemma-csm && cd ~/gemma-csm
+  hf download giannisan/gemma-csm-ckpts code/gemma-csm-code.tar.gz --local-dir /tmp/code
+  tar xzf /tmp/code/code/gemma-csm-code.tar.gz -C ~/gemma-csm
+fi
+cd ~/gemma-csm && mkdir -p .venv/bin && ln -sf "$(which python)" .venv/bin/python
 
 echo "=== [3/4] LibriTTS shards from HF ==="
 hf download giannisan/gemma-csm-shards --repo-type dataset --local-dir data \
