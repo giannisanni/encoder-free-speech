@@ -1,52 +1,168 @@
-% Add citations here. Starters to fill in with correct keys/fields:
+% Verified against primary sources (2026-06-15). Where a work has no arXiv/peer
+% paper, we cite the canonical report/blog + repo and say so in the note.
 
-@article{defossez2024mimi,
-  title  = {Mimi / Moshi: a speech-text foundation model and full-duplex codec},
-  author = {D{\'e}fossez, Alexandre and others},
-  year   = {2024},
-  note   = {TODO: exact title, venue, arXiv id}
+% ---------------- backbone & adaptation ----------------
+@misc{gemma4_2026,
+  title        = {Gemma 4 12B: a unified, encoder-free multimodal model},
+  author       = {{Google DeepMind}},
+  year         = {2026},
+  howpublished = {Google technical report / model card. \url{https://ai.google.dev/gemma/docs/core/model_card_4}, \url{https://huggingface.co/google/gemma-4-12B}},
+  note         = {No arXiv report. 12B "Unified" is encoder-free: 16 kHz audio in 40 ms / 640-float frames linearly projected to hidden 3840; 48 layers. NB: E2B/E4B audio variants use a USM conformer encoder (NOT encoder-free).}
 }
 
-@misc{sesame2024csm,
-  title  = {CSM: Conversational Speech Model},
-  author = {Sesame},
-  year   = {2024},
-  note   = {TODO: reference details}
+@inproceedings{dettmers2023qlora,
+  title     = {{QLoRA}: Efficient Finetuning of Quantized {LLMs}},
+  author    = {Dettmers, Tim and Pagnoni, Artidoro and Holtzman, Ari and Zettlemoyer, Luke},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2023},
+  note      = {arXiv:2305.14314}
 }
 
-@article{dettmers2023qlora,
-  title   = {QLoRA: Efficient Finetuning of Quantized LLMs},
-  author  = {Dettmers, Tim and Pagnoni, Artidoro and Holtzman, Ari and Zettlemoyer, Luke},
-  journal = {NeurIPS},
+@inproceedings{hu2022lora,
+  title     = {{LoRA}: Low-Rank Adaptation of Large Language Models},
+  author    = {Hu, Edward J. and Shen, Yelong and Wallis, Phillip and Allen-Zhu, Zeyuan and Li, Yuanzhi and Wang, Shean and Wang, Lu and Chen, Weizhu},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2022},
+  note      = {arXiv:2106.09685}
+}
+
+@inproceedings{houlsby2019adapters,
+  title     = {Parameter-Efficient Transfer Learning for {NLP}},
+  author    = {Houlsby, Neil and Giurgiu, Andrei and Jastrzebski, Stanislaw and Morrone, Bruna and de Laroussilhe, Quentin and Gesmundo, Andrea and Attariyan, Mona and Gelly, Sylvain},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  year      = {2019},
+  note      = {arXiv:1902.00751}
+}
+
+@inproceedings{vaswani2017attention,
+  title     = {Attention Is All You Need},
+  author    = {Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N. and Kaiser, Lukasz and Polosukhin, Illia},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2017},
+  note      = {arXiv:1706.03762}
+}
+
+% ---------------- codec & speech head ----------------
+@article{defossez2024moshi,
+  title   = {Moshi: a speech-text foundation model for real-time dialogue},
+  author  = {D{\'e}fossez, Alexandre and Mazar{\'e}, Laurent and Orsini, Manu and Royer, Am{\'e}lie and P{\'e}rez, Patrick and J{\'e}gou, Herv{\'e} and Grave, Edouard and Zeghidour, Neil},
+  journal = {arXiv preprint arXiv:2410.00037},
+  year    = {2024},
+  note    = {Introduces the Mimi codec: streaming split-RVQ, 24 kHz, 12.5 Hz frame rate, codebook 0 semantic + acoustic; checkpoint supports up to 32 codebooks (Moshi operates at 8 @ 1.1 kbps).}
+}
+
+@misc{sesame2025csm,
+  title        = {Crossing the uncanny valley of conversational voice ({CSM})},
+  author       = {Schalkwyk, Johan and Kumar, Ankit and Lyth, Dan and Eskimez, Sefik Emre and Hodari, Zack and Resnick, Cinjon and Sanabria, Ramon and Jiang, Raven},
+  year         = {2025},
+  howpublished = {Sesame AI research. \url{https://www.sesame.com/research/crossing_the_uncanny_valley_of_voice}; code \url{https://github.com/SesameAILabs/csm}},
+  note         = {No arXiv paper. Backbone (Llama) predicts Mimi codebook 0 (semantic); a depth decoder predicts the remaining 31 acoustic codebooks. We adopt this head topology on a frozen Gemma-4 backbone.}
+}
+
+% ---------------- datasets ----------------
+@inproceedings{zen2019libritts,
+  title     = {{LibriTTS}: A Corpus Derived from {LibriSpeech} for Text-to-Speech},
+  author    = {Zen, Heiga and Dang, Viet and Clark, Rob and Zhang, Yu and Weiss, Ron J. and Jia, Ye and Chen, Zhifeng and Wu, Yonghui},
+  booktitle = {Interspeech},
+  pages     = {1526--1530},
+  year      = {2019},
+  note      = {arXiv:1904.02882. 585 h, 24 kHz, 2456 speakers, CC BY 4.0. We use a ~110 h subset.}
+}
+
+@article{casia2025opens2s,
+  title   = {{OpenS2S}: Advancing Fully Open-Source End-to-End Empathetic Large Speech Language Model},
+  author  = {{CASIA-LM}},
+  journal = {arXiv preprint arXiv:2507.05177},
+  year    = {2025},
+  note    = {Apache-2.0. EN split: 49,368 paired (audio-query, audio-response) examples w/ transcripts + emotion; response wavs in 7 tar parts. Native tokenizer is GLM-4-Voice; we re-encode response audio with Mimi.}
+}
+
+% ---------------- related: frozen-LLM modality adaptation ----------------
+@misc{penov2026loraBridges,
+  title        = {Conditional LoRA Bridges for Modular Sensor Adaptation of Frozen Small Language Models},
+  author       = {Penov, Franci},
+  year         = {2026},
+  month        = jun,
+  howpublished = {kortexa.ai (LegoLM), self-published. \url{https://github.com/kortexa-ai/legolm.paper}},
+  note         = {Hypernetwork generates LoRA from frozen sensor-encoder features for a frozen 33.6M LM. Key finding (parallels ours): aggregate LM loss (BPB) cannot detect conditioning; task-aligned probes can.}
+}
+
+@inproceedings{alayrac2022flamingo,
+  title     = {Flamingo: a Visual Language Model for Few-Shot Learning},
+  author    = {Alayrac, Jean-Baptiste and others},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2022},
+  note      = {arXiv:2204.14198}
+}
+
+@inproceedings{liu2023llava,
+  title     = {Visual Instruction Tuning},
+  author    = {Liu, Haotian and Li, Chunyuan and Wu, Qingyang and Lee, Yong Jae},
+  booktitle = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year      = {2023},
+  note      = {arXiv:2304.08485}
+}
+
+% ---------------- related: speech / audio LLMs ----------------
+@inproceedings{radford2023whisper,
+  title     = {Robust Speech Recognition via Large-Scale Weak Supervision},
+  author    = {Radford, Alec and Kim, Jong Wook and Xu, Tao and Brockman, Greg and McLeavey, Christine and Sutskever, Ilya},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  year      = {2023},
+  note      = {arXiv:2212.04356}
+}
+
+@inproceedings{tang2024salmonn,
+  title     = {{SALMONN}: Towards Generic Hearing Abilities for Large Language Models},
+  author    = {Tang, Changli and Yu, Wenyi and Sun, Guangzhi and Chen, Xianzhao and Tan, Tian and Li, Wei and Lu, Lu and Ma, Zejun and Zhang, Chao},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2024},
+  note      = {arXiv:2310.13289}
+}
+
+@article{chu2023qwenaudio,
+  title   = {{Qwen-Audio}: Advancing Universal Audio Understanding via Unified Large-Scale Audio-Language Models},
+  author  = {Chu, Yunfei and Xu, Jin and Zhou, Xiaohuan and Yang, Qian and Zhang, Shiliang and Yan, Zhijie and Zhou, Chang and Zhou, Jingren},
+  journal = {arXiv preprint arXiv:2311.07919},
   year    = {2023}
 }
 
-@misc{gemma4,
-  title  = {Gemma 4 multimodal models},
-  author = {Google DeepMind},
-  year   = {2026},
-  note   = {TODO: technical report}
+@inproceedings{zhang2023speechgpt,
+  title     = {{SpeechGPT}: Empowering Large Language Models with Intrinsic Cross-Modal Conversational Abilities},
+  author    = {Zhang, Dong and Li, Shimin and Zhang, Xin and Zhan, Jun and Wang, Pengyu and Zhou, Yaqian and Qiu, Xipeng},
+  booktitle = {Findings of EMNLP},
+  year      = {2023},
+  note      = {arXiv:2305.11000}
 }
 
-@inproceedings{zen2019libritts,
-  title     = {LibriTTS: A Corpus Derived from LibriSpeech for Text-to-Speech},
-  author    = {Zen, Heiga and others},
-  booktitle = {Interspeech},
-  year      = {2019}
+@article{rubenstein2023audiopalm,
+  title   = {{AudioPaLM}: A Large Language Model That Can Speak and Listen},
+  author  = {Rubenstein, Paul K. and others},
+  journal = {arXiv preprint arXiv:2306.12925},
+  year    = {2023}
 }
 
-@misc{opens2s,
-  title  = {OpenS2S speech-to-speech dataset},
-  author = {CASIA-LM},
-  year   = {2025},
-  note   = {TODO: reference details}
+@article{wang2023valle,
+  title   = {Neural Codec Language Models are Zero-Shot Text to Speech Synthesizers},
+  author  = {Wang, Chengyi and others},
+  journal = {arXiv preprint arXiv:2301.02111},
+  year    = {2023}
 }
 
-@misc{penov2026loraBridges,
-  title  = {Conditional LoRA Bridges for Modular Sensor Adaptation of Frozen Small Language Models},
-  author = {Penov, Franci},
-  year   = {2026},
-  month  = jun,
-  howpublished = {kortexa.ai (LegoLM), self-published. \url{https://github.com/kortexa-ai/legolm.paper}},
-  note   = {Hypernetwork generates LoRA from frozen sensor-encoder features, injected into a frozen 33.6M LM (vision/audio/IMU). Key finding: aggregate LM loss (BPB) cannot detect conditioning; task-aligned probes can. Diversity reg. needed to avoid hypernetwork weight collapse.}
+@article{lakhotia2021gslm,
+  title   = {On Generative Spoken Language Modeling from Raw Audio},
+  author  = {Lakhotia, Kushal and others},
+  journal = {Transactions of the Association for Computational Linguistics (TACL)},
+  volume  = {9},
+  pages   = {1336--1354},
+  year    = {2021},
+  note    = {arXiv:2102.01192}
+}
+
+@inproceedings{fang2024llamaomni,
+  title     = {{LLaMA-Omni}: Seamless Speech Interaction with Large Language Models},
+  author    = {Fang, Qingkai and Guo, Shoutao and Zhou, Yan and Ma, Zhengrui and Zhang, Shaolei and Feng, Yang},
+  booktitle = {International Conference on Learning Representations (ICLR)},
+  year      = {2025},
+  note      = {arXiv:2409.06666}
 }

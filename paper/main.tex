@@ -66,9 +66,31 @@ Research questions:
 
 \section{Related Work}
 \label{sec:related}
-\todo{Full pass. Cover: speech/audio LLMs with external ASR encoders;
-CSM/Sesame; the Mimi RVQ codec (12.5\,Hz); multimodal Gemma backbones and native
-audio pathways; QLoRA / parameter-efficient adaptation of frozen quantized LLMs.}
+\paragraph{Speech and audio LLMs.}
+Most speech-capable LLMs attach a separate audio encoder to a text LM. On the
+understanding side, SALMONN~\citep{tang2024salmonn} fuses Whisper~\citep{radford2023whisper}
+and BEATs encoders into a frozen LLM via a Q-Former, and Qwen-Audio~\citep{chu2023qwenaudio}
+couples a Whisper-style encoder to an LLM; both are speech-in, text-out. For
+speech \emph{generation}, a dominant line discretizes audio into units or codec
+tokens: GSLM~\citep{lakhotia2021gslm} models raw-audio units, VALL-E~\citep{wang2023valle}
+is a codec-token LM for TTS, and SpeechGPT~\citep{zhang2023speechgpt} and
+AudioPaLM~\citep{rubenstein2023audiopalm} extend an LLM's vocabulary with speech
+units and fully (re)train. Full-duplex models such as Moshi~\citep{defossez2024moshi}
+train a bespoke speech backbone with the Mimi codec, while
+LLaMA-Omni~\citep{fang2024llamaomni} adds a speech adaptor and streaming decoder
+atop an LLM but still bolts a Whisper encoder on the input. We differ on four
+axes: (i)~no external audio encoder---we use Gemma-4's \emph{native} audio
+pathway; (ii)~the backbone stays frozen, adapted only by QLoRA plus a speech head
+on a single 16\,GB GPU; (iii)~bidirectional conversational speech; and (iv)~we
+gate on free-running WER rather than teacher-forced loss (\S\ref{sec:findings}).
+
+\paragraph{Parameter-efficient adaptation of frozen models.}
+We freeze the backbone and train only adapters: LoRA~\citep{hu2022lora} (here in
+its 4-bit QLoRA form~\citep{dettmers2023qlora}) and bottleneck
+adapters~\citep{houlsby2019adapters}. This follows the ``freeze the LLM, add a
+small bridge'' paradigm of Flamingo~\citep{alayrac2022flamingo} and
+LLaVA~\citep{liu2023llava}, but for audio in \emph{and} out and \emph{without} a
+separate modality encoder.
 
 \paragraph{Conditioning frozen LMs on new modalities.}
 Closest to our setting, \citet{penov2026loraBridges} adapt a \emph{frozen} small
@@ -89,14 +111,25 @@ capability of interest, and a task-grounded probe is required to see it.
 \section{Method}
 \label{sec:method}
 \subsection{Encoder-free backbone}
-\todo{Gemma-4 ``Unified''; audio input via \texttt{get\_audio\_features}
-(640$\to$3840, 1:1 time), merged at audio placeholder tokens. No separate ASR
-encoder.}
+We build on Gemma-4 12B ``Unified''~\citep{gemma4_2026}, Google's encoder-free
+multimodal variant: 16\,kHz audio is sliced into 40\,ms / 640-float frames and
+linearly projected into the decoder's hidden space ($640\to3840$, 1:1 in time),
+merged at audio placeholder tokens---there is no separate ASR/audio encoder. We
+access these projected features via the model's \texttt{get\_audio\_features}.
+The smaller E2B/E4B audio variants instead use a USM conformer encoder and are
+\emph{not} encoder-free; our encoder-free claim is specific to the 12B.
+\todo{verify placeholder-merge + RoPE details against the modeling code.}
 
 \subsection{Speech-output head}
-\todo{Sequence layout \texttt{[text $\mid$ audio-in $\mid$ audio-out frames]};
-$c_0$ semantic head + depth transformer predicting Mimi codebooks 1--31;
-loss $=\mathcal{L}_{c_0} + \lambda\,\mathcal{L}_{\text{depth}}$.}
+Audio is represented as Mimi codes~\citep{defossez2024moshi}: a streaming
+split-RVQ codec at 12.5\,Hz whose released checkpoint provides 32 codebooks
+(1 semantic + 31 acoustic). Following the CSM head topology~\citep{sesame2025csm},
+a semantic head predicts codebook~0 ($c_0$) and a depth transformer
+autoregressively predicts the remaining 31 acoustic codebooks conditioned on
+$c_0$; the loss is $\mathcal{L}_{c_0} + \lambda\,\mathcal{L}_{\text{depth}}$.
+Unlike CSM (a from-scratch Llama backbone), we attach this head to the
+\emph{frozen} Gemma-4 decoder. Sequence layout:
+\texttt{[text $\mid$ audio-in $\mid$ audio-out frames]}.
 
 \subsection{QLoRA training on 16\,GB}
 \todo{4-bit NF4 frozen backbone + LoRA (r32, all-linear) + PagedAdamW8bit;
@@ -111,9 +144,12 @@ understanding-conditioned response on conversational query/response audio
 
 \section{Experimental Setup}
 \label{sec:setup}
-\paragraph{Data.} Phase A: LibriTTS (\todo{$\sim$110\,h, 90.6k clips used}).
-Phase B: OpenS2S query/response speech pairs. \todo{licensing; Mimi encoding at
-12.5\,Hz.}
+\paragraph{Data.} Phase A trains on a $\sim$110\,h / 90.6k-clip subset of
+LibriTTS~\citep{zen2019libritts} (24\,kHz, CC BY 4.0). Phase B uses the English
+split of OpenS2S~\citep{casia2025opens2s} (Apache-2.0): 49{,}368 paired
+(audio-query, audio-response) examples with transcripts and emotion labels. We
+re-encode all response audio with Mimi at 12.5\,Hz (OpenS2S itself ships raw
+WAVs tokenized with GLM-4-Voice, which we do not use).
 \paragraph{Hardware.} Single 16\,GB consumer GPU. \todo{exact card; VRAM budget.}
 \paragraph{Evaluation.} Free-running decode $\to$ faster-whisper transcription
 $\to$ WER and word-recall against held-out references; mean-opinion / blind
