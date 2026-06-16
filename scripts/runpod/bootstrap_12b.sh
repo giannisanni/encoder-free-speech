@@ -46,8 +46,10 @@ assert not miss, "stale code: missing %s" % miss
 PY
 
 echo "=== [3/5] long-context shards + ljspeech from HF ==="
-hf download giannisan/gemma-csm-shards --repo-type dataset --local-dir data \
-  --include "shards_long/*" "shards/*"
+# NOTE: newer huggingface_hub CLI mis-parses multiple --include patterns (treats
+# the 2nd as a literal filename -> 404). Use ONE --include per call.
+hf download giannisan/gemma-csm-shards --repo-type dataset --local-dir data --include "shards_long/*"
+hf download giannisan/gemma-csm-shards --repo-type dataset --local-dir data --include "shards/*" || true
 echo "shards_long: $(ls data/shards_long/*.pt 2>/dev/null | wc -l)  ljspeech: $(ls data/shards/*.pt 2>/dev/null | wc -l)"
 
 echo "=== [4/5] warm-start checkpoint from HF (weights only, fresh-opt) ==="
