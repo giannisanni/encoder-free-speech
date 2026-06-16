@@ -108,6 +108,7 @@ def main():
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--lr", type=float, default=None, help="override config lr (big-batch)")
+    p.add_argument("--grad-clip", type=float, default=1.0, help="max grad norm (0=off)")
     p.add_argument("--backbone-id", default="google/gemma-4-12B-it")
     p.add_argument("--no-audio-in", action="store_true",
                    help="Phase A: text->audio only (skip audio tower); heads learn to speak")
@@ -178,7 +179,10 @@ def main():
     if resume_opt is not None:
         try:
             opt.load_state_dict(resume_opt)
-            print("optimizer state restored", flush=True)
+            _base = a.lr if a.lr is not None else cfg.lr
+            opt.param_groups[0]["lr"] = _base
+            opt.param_groups[1]["lr"] = _base * a.depth_lr_mult
+            print(f"optimizer state restored; LR override rest={_base} depth={_base*a.depth_lr_mult}", flush=True)
         except Exception as e:
             print(f"WARN optimizer restore failed ({e}); continuing fresh", flush=True)
     del resume_opt
@@ -240,6 +244,8 @@ def main():
             out = model(batch)
             (out["loss"] / a.grad_accum).backward()
             if (step + 1) % a.grad_accum == 0:
+                torch.nn.utils.clip_grad_norm_(
+                    [p for grp in opt.param_groups for p in grp["params"]], a.grad_clip)
                 opt.step()
                 opt.zero_grad()
             if step % 50 == 0:
