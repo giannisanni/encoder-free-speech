@@ -99,10 +99,15 @@ python -m gemma_csm.train_audio_in \
 
 ## Evaluate
 
-Always gate on free-running decode, not loss:
+Always gate on free-running decode, not teacher-forced loss. Decode clips from a
+checkpoint, then score word error rate against the references with faster-whisper:
 
 ```bash
-python -m gemma_csm.eval_wer --ckpt checkpoints/run1/ckpt_8000.pt --shard "data/shards_opens2s/*.pt"
+# 1. decode free-running clips from a checkpoint
+python decode_tts.py --ckpt checkpoints/run1/ckpt_8000.pt \
+  --shards "data/shards_opens2s/*.pt" --n-clips 20 --out samples_eval
+# 2. score WER over a manifest of (decoded audio, reference text)
+python -m gemma_csm.eval_wer --manifest wer_manifest.tsv
 ```
 
 ## Checkpoints and shards
