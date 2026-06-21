@@ -1,0 +1,31 @@
+gemma-csm
+Copyright 2026 Gianni Sanrochman
+
+This product is licensed under the Apache License, Version 2.0 (the "License");
+see the LICENSE file. The Apache-2.0 license applies to the CODE in this
+repository.
+
+It does NOT relicense the third-party models, datasets, or checkpoints that the
+code depends on or produces. Those keep their own terms:
+
+- Gemma-4 backbone (google/gemma-4-12B-it and the E2B/E4B variants): governed by
+  Google's Gemma Terms of Use (https://ai.google.dev/gemma/terms). This repo does
+  not redistribute Gemma weights; it loads them as a dependency. You must accept
+  Google's terms to obtain them.
+
+- Mimi neural audio codec (Kyutai / Moshi): used as a frozen dependency; refer to
+  the Kyutai/Moshi project for its license terms.
+
+- Datasets:
+  - OpenS2S (CASIA-LM/OpenS2S_Datasets): Apache-2.0.
+  - LibriTTS / LibriTTS-R: CC BY 4.0.
+  - LJSpeech: public domain.
+
+- Trained checkpoints released by this project (the CSM-style speech head and the
+  QLoRA adapters, at huggingface.co/giannisan/gemma-csm-ckpts) are DERIVATIVES of
+  Gemma-4 and therefore inherit and are subject to Google's Gemma Terms of Use,
+  in addition to any terms stated on the checkpoint repository. They are not
+  covered by this repository's Apache-2.0 license.
+
+Users are responsible for complying with the licenses of all upstream models and
+datasets they use with this code.

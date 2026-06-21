@@ -117,7 +117,8 @@ def _stream_first(fs, path, k, skip=0):
 
 def prepare_stream(out_dir: Path, n_pairs: int, shard_size: int = 1000,
                    device: str = "cpu", backbone_id: str = "google/gemma-4-12B-it",
-                   max_seconds: float = 20.0, skip: int = 0, shard_start: int = 0):
+                   max_seconds: float = 20.0, skip: int = 0, shard_start: int = 0,
+                   min_words: int = 0, candidates: int = 0):
     from huggingface_hub import HfFileSystem, hf_hub_download
     from transformers import AutoProcessor
 
@@ -134,8 +135,10 @@ def prepare_stream(out_dir: Path, n_pairs: int, shard_size: int = 1000,
             meta[int(d["index"])] = d
     print(f"manifest: {len(meta)} pairs total", flush=True)
 
-    # first-K encountered from each scattered tar (leading bytes), intersect
-    k = max(int(n_pairs * 1.3), 600)
+    # first-K encountered from each scattered tar (leading bytes), intersect.
+    # when filtering by --min-words most candidates are discarded, so stream a
+    # bigger pool (--candidates) than the target n_pairs.
+    k = candidates if candidates > 0 else max(int(n_pairs * 1.3), 600)
     fs = HfFileSystem()
     print(f"streaming first ~{k} query wavs ...", flush=True)
     qw = _stream_first(fs, QUERY_TAR, k, skip)
@@ -144,7 +147,7 @@ def prepare_stream(out_dir: Path, n_pairs: int, shard_size: int = 1000,
     pairs = [i for i in qw if i in rw and i in meta]
     print(f"  {len(rw)} response wavs; {len(pairs)} paired indices", flush=True)
 
-    items, n_shard, n_done, n_skip = [], shard_start, 0, 0
+    items, n_shard, n_done, n_skip, n_short = [], shard_start, 0, 0, 0
 
     def flush():
         nonlocal items, n_shard
@@ -153,13 +156,18 @@ def prepare_stream(out_dir: Path, n_pairs: int, shard_size: int = 1000,
             print(f"wrote opens2s_en_{n_shard:03d}.pt ({len(items)})", flush=True)
             items, n_shard = [], n_shard + 1
 
-    for idx in pairs[:n_pairs]:
+    for idx in pairs:
+        if n_done >= n_pairs:
+            break
         d = meta[idx]
+        if min_words and len((d["response"].get("text", "") or "").split()) < min_words:
+            n_short += 1
+            continue
         rdata, rsr = sf.read(io.BytesIO(rw[idx]), dtype="float32")
         rdata = _mono(rdata)
         if len(rdata) > max_seconds * rsr:
+            rdata = rdata[: int(max_seconds * rsr)]  # truncate over-long; keep it (long/short mix)
             n_skip += 1
-            continue
         ev = codec.encode.__code__.co_varnames
         codes = (codec.encode(torch.from_numpy(rdata), sample_rate=rsr)
                  if "sample_rate" in ev else codec.encode(torch.from_numpy(rdata)))
@@ -184,7 +192,8 @@ def prepare_stream(out_dir: Path, n_pairs: int, shard_size: int = 1000,
         if len(items) >= shard_size:
             flush()
     flush()
-    print(f"done: {n_done} encoded, {n_skip} skipped", flush=True)
+    print(f"done: {n_done} encoded, {n_short} skipped (<{min_words} words), "
+          f"{n_skip} truncated (capped at {max_seconds}s)", flush=True)
 
 
 def prepare_stream_full(out_dir: Path, target: int, shard_size: int = 1000,
@@ -282,8 +291,8 @@ def prepare_stream_full(out_dir: Path, target: int, shard_size: int = 1000,
         rdata, rsr = sf.read(io.BytesIO(rw[idx]), dtype="float32")
         rdata = _mono(rdata)
         if len(rdata) > max_seconds * rsr:
+            rdata = rdata[: int(max_seconds * rsr)]  # truncate over-long; keep it (long/short mix)
             n_skip += 1
-            continue
         ev = codec.encode.__code__.co_varnames
         codes = (codec.encode(torch.from_numpy(rdata), sample_rate=rsr)
                  if "sample_rate" in ev else codec.encode(torch.from_numpy(rdata)))
@@ -308,7 +317,7 @@ def prepare_stream_full(out_dir: Path, target: int, shard_size: int = 1000,
         if len(items) >= shard_size:
             flush()
     flush()
-    print(f"done: {n_done} encoded, {n_skip} skipped (over-long)", flush=True)
+    print(f"done: {n_done} encoded, {n_skip} truncated (over-long capped at {max_seconds}s)", flush=True)
 
 
 if __name__ == "__main__":
@@ -325,12 +334,20 @@ if __name__ == "__main__":
                    help="read ALL response pieces, dedupe vs existing shards, add --target new")
     p.add_argument("--target", type=int, default=5000, help="new pairs to add in --full mode")
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    p.add_argument("--max-seconds", type=float, default=20.0,
+                   help="cap response length; over-long clips are TRUNCATED (kept), not skipped")
+    p.add_argument("--min-words", type=int, default=0,
+                   help="only keep response texts with >= N words (long-sentence dataset)")
+    p.add_argument("--candidates", type=int, default=0,
+                   help="stream N candidate wavs to filter from (default ~1.3x n-pairs); "
+                        "set high when --min-words discards most candidates")
     a = p.parse_args()
     if a.full:
         prepare_stream_full(a.out, a.target, a.shard_size, a.device, a.backbone_id,
-                            shard_start=a.shard_start)
+                            max_seconds=a.max_seconds, shard_start=a.shard_start)
     elif a.stream:
         prepare_stream(a.out, a.n_pairs, a.shard_size, a.device, a.backbone_id,
-                       skip=a.skip, shard_start=a.shard_start)
+                       max_seconds=a.max_seconds, skip=a.skip, shard_start=a.shard_start,
+                       min_words=a.min_words, candidates=a.candidates)
     else:
         raise SystemExit("use --full (recommended) or --stream")

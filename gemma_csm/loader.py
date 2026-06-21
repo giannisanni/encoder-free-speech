@@ -1,4 +1,20 @@
 import torch
+
+# --- set_submodule shim ---
+# transformers' bnb 4-bit path calls nn.Module.set_submodule(), which only exists
+# in torch >= 2.5. Some GPU host images (e.g. the RunPod PyTorch 2.4 template) ship
+# an older torch, so we backfill the method when missing. No-op on torch >= 2.5.
+if not hasattr(torch.nn.Module, "set_submodule"):
+    def _set_submodule(self, target, module):
+        atoms = target.split(".")
+        name = atoms.pop(-1)
+        mod = self
+        for item in atoms:
+            mod = getattr(mod, item)
+        setattr(mod, name, module)
+    torch.nn.Module.set_submodule = _set_submodule
+# --- end shim ---
+
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
@@ -31,10 +47,18 @@ def load_gemma_csm(cfg: GemmaCSMConfig, device: str = "cuda"):
     bnb = BitsAndBytesConfig(
         load_in_4bit=True, bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True,
+        # KEEP the audio/vision towers + projector + tied lm_head in bf16. NF4 on the
+        # audio projector destroys speech COMPREHENSION (text survives, audio doesn't) --
+        # confirmed: 4-bit -> "I'm a text-based AI"; hybrid -> transcribes verbatim, ~same VRAM.
+        # Passing a skip-list overrides the default auto-skip, so list lm_head/embed_tokens too.
+        llm_int8_skip_modules=["audio_tower", "embed_audio", "vision_tower", "embed_vision",
+                               "multi_modal_projector", "embedding_projection",
+                               "lm_head", "embed_tokens"],
     )
+    import os
     full = AutoModelForCausalLM.from_pretrained(
         cfg.backbone_id, quantization_config=bnb, dtype=torch.bfloat16,
-        attn_implementation="sdpa",
+        attn_implementation=os.environ.get("GEMMA_ATTN", "sdpa"),  # GEMMA_ATTN=eager to debug kernel OOB
     )
     backbone = _extract_text_model(full)
     if backbone is not full:
@@ -53,7 +77,8 @@ def load_gemma_csm(cfg: GemmaCSMConfig, device: str = "cuda"):
         target_modules=targets,
     )
     backbone = get_peft_model(backbone, lora)
-    backbone.gradient_checkpointing_enable()
+    if os.environ.get("GEMMA_GC", "on") != "off":   # GEMMA_GC=off to debug checkpointing corruption
+        backbone.gradient_checkpointing_enable()
     backbone.enable_input_require_grads()
     model = GemmaCSM(cfg, backbone=backbone)
     # new modules in bf16 on GPU; quantized backbone manages its own placement
@@ -134,10 +159,18 @@ def load_gemma_csm_audio_in(cfg: GemmaCSMConfig, device: str = "cuda"):
     bnb = BitsAndBytesConfig(
         load_in_4bit=True, bnb_4bit_quant_type="nf4",
         bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True,
+        # KEEP the audio/vision towers + projector + tied lm_head in bf16. NF4 on the
+        # audio projector destroys speech COMPREHENSION (text survives, audio doesn't) --
+        # confirmed: 4-bit -> "I'm a text-based AI"; hybrid -> transcribes verbatim, ~same VRAM.
+        # Passing a skip-list overrides the default auto-skip, so list lm_head/embed_tokens too.
+        llm_int8_skip_modules=["audio_tower", "embed_audio", "vision_tower", "embed_vision",
+                               "multi_modal_projector", "embedding_projection",
+                               "lm_head", "embed_tokens"],
     )
+    import os
     full = AutoModelForCausalLM.from_pretrained(
         cfg.backbone_id, quantization_config=bnb, dtype=torch.bfloat16,
-        attn_implementation="sdpa",
+        attn_implementation=os.environ.get("GEMMA_ATTN", "sdpa"),  # GEMMA_ATTN=eager to debug kernel OOB
     )
     # inner Gemma4UnifiedModel owns get_audio_features (audio tower + projector)
     mm = getattr(full, "model", full)
@@ -156,7 +189,8 @@ def load_gemma_csm_audio_in(cfg: GemmaCSMConfig, device: str = "cuda"):
         target_modules=targets,
     )
     backbone = get_peft_model(backbone, lora)
-    backbone.gradient_checkpointing_enable()
+    if os.environ.get("GEMMA_GC", "on") != "off":   # GEMMA_GC=off to debug checkpointing corruption
+        backbone.gradient_checkpointing_enable()
     backbone.enable_input_require_grads()
 
     model = GemmaCSM(cfg, backbone=backbone)

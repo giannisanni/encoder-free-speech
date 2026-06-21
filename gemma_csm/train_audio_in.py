@@ -32,19 +32,22 @@ from gemma_csm.loader import load_gemma_csm_audio_in
 from gemma_csm.train import trainable_state_dict
 
 
-def make_paged_opt(model, lr, depth_lr_mult):
-    """PagedAdamW8bit (QLoRA-standard): ~4x smaller state than fp32 + CPU paging
-    under pressure -- needed at the 12B 16GB edge. Depth decoder in its own group."""
-    import bitsandbytes as bnb
+def make_paged_opt(model, lr, depth_lr_mult, full=False):
+    """Optimizer with the depth decoder in its own (higher-LR) group.
+    full=True -> full fp32 AdamW (stable; ~3GB state for our trainable params,
+    fits 48GB; use on RunPod). full=False -> PagedAdamW8bit (8-bit state, needed
+    only at the 12B 16GB substrate edge -- but its quantized-variance m/sqrt(v)
+    blow-up NaNs the joint run, so prefer full=True off-substrate)."""
     depth, rest = [], []
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
         (depth if name.startswith("depth.") else rest).append(p)
-    return bnb.optim.PagedAdamW8bit([
-        {"params": rest, "lr": lr},
-        {"params": depth, "lr": lr * depth_lr_mult},
-    ])
+    groups = [{"params": rest, "lr": lr}, {"params": depth, "lr": lr * depth_lr_mult}]
+    if full:
+        return torch.optim.AdamW(groups)
+    import bitsandbytes as bnb
+    return bnb.optim.PagedAdamW8bit(groups, eps=1e-6)
 
 
 @torch.no_grad()
@@ -65,6 +68,47 @@ def evaluate(model, val_items, audio_encode, tok, max_audio, max_frames,
         dps.append(float(out["loss_depth"]))
     model.train()
     return (sum(c0s) / len(c0s), sum(dps) / len(dps)) if c0s else (float("nan"), float("nan"))
+
+
+@torch.no_grad()
+def evaluate_joint(model, val_items, audio_encode, tok, eos_id, max_audio, max_frames,
+                   max_n=48, max_text=96):
+    """Teacher-forced held-out text/c0/depth for --joint (overfit sentinel). The
+    real quality gate is a text-free decode (generate_joint); this just tracks
+    that the three losses generalise."""
+    model.eval()
+    txt, c0s, dps = [], [], []
+    for it in val_items[:max_n]:
+        b = collate_opens2s([it], tok, max_audio, max_frames, max_text)
+        b = {k: (v.cuda() if torch.is_tensor(v) else v) for k, v in b.items()}
+        b["audio_in_embeds"] = audio_encode(
+            b["input_features"].to(torch.bfloat16), b["input_features_mask"])
+        b["audio_in_mask"] = b["input_features_mask"]
+        out = model.forward_joint(b, eos_id, tok.bos_token_id)
+        txt.append(float(out["loss_text"])); c0s.append(float(out["loss_c0"])); dps.append(float(out["loss_depth"]))
+    model.train()
+    n = len(c0s) or 1
+    return sum(txt) / n, sum(c0s) / n, sum(dps) / n
+
+
+def evaluate_grounded(model, val_items, audio_encode, tok, eos_id, max_audio, max_frames,
+                      max_n=48, max_text=96):
+    """Teacher-forced held-out comprehension/text/c0/depth for --grounded. The real
+    gate is transcript WER from a generate_grounded decode; this tracks the losses."""
+    model.eval()
+    cmp, txt, c0s, dps = [], [], [], []
+    for it in val_items[:max_n]:
+        b = collate_opens2s([it], tok, max_audio, max_frames, max_text)
+        b = {k: (v.cuda() if torch.is_tensor(v) else v) for k, v in b.items()}
+        b["audio_in_embeds"] = audio_encode(
+            b["input_features"].to(torch.bfloat16), b["input_features_mask"])
+        b["audio_in_mask"] = b["input_features_mask"]
+        out = model.forward_grounded(b, eos_id, tok.bos_token_id)
+        cmp.append(float(out["loss_compr"])); txt.append(float(out["loss_text"]))
+        c0s.append(float(out["loss_c0"])); dps.append(float(out["loss_depth"]))
+    model.train()
+    n = len(c0s) or 1
+    return sum(cmp) / n, sum(txt) / n, sum(c0s) / n, sum(dps) / n
 
 
 def evaluate_tts(model, val_raw, tok, pad_id, max_n=64):
@@ -109,11 +153,25 @@ def main():
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--lr", type=float, default=None, help="override config lr (big-batch)")
     p.add_argument("--grad-clip", type=float, default=1.0, help="max grad norm (0=off)")
+    p.add_argument("--warmup-steps", type=int, default=0,
+                   help="linear LR warmup from 0 over N steps (anti early-blowup; needed for --joint)")
+    p.add_argument("--full-opt", action="store_true",
+                   help="full fp32 AdamW instead of PagedAdamW8bit (stable; needs ~3GB more, use on 48GB GPUs)")
     p.add_argument("--backbone-id", default="google/gemma-4-12B-it")
     p.add_argument("--no-audio-in", action="store_true",
                    help="Phase A: text->audio only (skip audio tower); heads learn to speak")
     p.add_argument("--tts", action="store_true",
                    help="train on TTS shards (CodesDataset text->speech); implies --no-audio-in")
+    p.add_argument("--joint", action="store_true",
+                   help="joint text+audio S2S: [query-audio | response-text | response-audio]; "
+                        "model GENERATES the reply text (LM loss) then speaks it. Requires audio-in.")
+    p.add_argument("--text-weight", type=float, default=1.0,
+                   help="weight on the response-text LM loss in --joint mode")
+    p.add_argument("--grounded", action="store_true",
+                   help="grounded inner monologue: [query-audio | query-transcript | reply-text | "
+                        "reply-audio]; model TRANSCRIBES then replies then speaks. Requires audio-in.")
+    p.add_argument("--comprehension-weight", type=float, default=1.0,
+                   help="weight on the query-transcript (comprehension) LM loss in --grounded mode")
     p.add_argument("--sample-every", type=int, default=0,
                    help="every N steps decode a few clips in-process (0=off)")
     p.add_argument("--sample-clips", type=int, default=3)
@@ -126,6 +184,10 @@ def main():
     cfg.lora_all_linear = a.lora_all_linear
     cfg.depth_loss_frame_frac = a.depth_frac
     cfg.depth_loss_weight = a.depth_weight
+    cfg.text_loss_weight = a.text_weight
+    cfg.comprehension_loss_weight = a.comprehension_weight
+    if (a.joint or a.grounded) and (a.tts or a.no_audio_in):
+        raise SystemExit("--joint/--grounded need audio-in: do not pass --tts/--no-audio-in")
 
     model, tok, audio_encode = load_gemma_csm_audio_in(cfg)
 
@@ -175,7 +237,7 @@ def main():
             collate_fn=functools.partial(collate_opens2s, tok=tok, max_audio=a.max_audio,
                                          max_frames=a.max_frames, max_text=a.max_text),
         )
-    opt = make_paged_opt(model, a.lr if a.lr is not None else cfg.lr, a.depth_lr_mult)
+    opt = make_paged_opt(model, a.lr if a.lr is not None else cfg.lr, a.depth_lr_mult, full=a.full_opt)
     if resume_opt is not None:
         try:
             opt.load_state_dict(resume_opt)
@@ -231,6 +293,9 @@ def main():
         finally:
             model.train(); torch.cuda.empty_cache()
 
+    if os.environ.get("JOINT_ANOMALY"):  # localize finite-forward/NaN-backward op
+        torch.autograd.set_detect_anomaly(True)
+        print("autograd anomaly detection ON", flush=True)
     step, t0 = start_step, time.time()
     while step < a.steps:
         for batch in dl:
@@ -241,25 +306,73 @@ def main():
                     batch["input_features"].to(torch.bfloat16),
                     batch["input_features_mask"])
                 batch["audio_in_mask"] = batch["input_features_mask"]
-            out = model(batch)
+            if a.grounded:
+                out = model.forward_grounded(batch, tok.eos_token_id, tok.bos_token_id)
+            elif a.joint:
+                out = model.forward_joint(batch, tok.eos_token_id, tok.bos_token_id)
+            else:
+                out = model(batch)
+            if not torch.isfinite(out["loss"]):
+                print(f"WARN non-finite loss at step {step} "
+                      f"(text={float(out.get('loss_text', 0)):.2f} c0={float(out['loss_c0']):.2f} "
+                      f"depth={float(out['loss_depth']):.2f}); skipping step", flush=True)
+                opt.zero_grad(set_to_none=True)
+                step += 1
+                continue
             (out["loss"] / a.grad_accum).backward()
             if (step + 1) % a.grad_accum == 0:
-                torch.nn.utils.clip_grad_norm_(
+                if a.warmup_steps and step < a.warmup_steps:
+                    scale = (step + 1) / a.warmup_steps
+                    _base = a.lr if a.lr is not None else cfg.lr
+                    opt.param_groups[0]["lr"] = _base * scale
+                    opt.param_groups[1]["lr"] = _base * a.depth_lr_mult * scale
+                gnorm = torch.nn.utils.clip_grad_norm_(
                     [p for grp in opt.param_groups for p in grp["params"]], a.grad_clip)
+                # GRAD GUARD: a finite loss can still yield a NaN/Inf gradient in
+                # backward; clip_grad_norm_ then spreads that NaN to EVERY param via
+                # the global norm, so the first opt.step poisons all weights. Skip
+                # the step when the norm is non-finite (weights stay clean).
+                if not torch.isfinite(gnorm):
+                    bad = "?"
+                    if os.environ.get("JOINT_GRAD_DEBUG"):  # localize the source param
+                        for _n, _p in model.named_parameters():
+                            if _p.grad is not None and not torch.isfinite(_p.grad).all():
+                                bad = _n
+                                break
+                    print(f"WARN non-finite grad-norm at step {step} "
+                          f"(norm={float(gnorm):.3e}, first-bad-param={bad}); skipping opt.step",
+                          flush=True)
+                    opt.zero_grad(set_to_none=True)
+                    step += 1
+                    continue
                 opt.step()
                 opt.zero_grad()
             if step % 50 == 0:
-                print(f"step {step}  c0 {out['loss_c0']:.3f}  "
+                cx = f"compr {out['loss_compr']:.3f}  " if "loss_compr" in out else ""
+                tx = f"text {out['loss_text']:.3f}  " if "loss_text" in out else ""
+                print(f"step {step}  {cx}{tx}c0 {out['loss_c0']:.3f}  "
                       f"depth {out['loss_depth']:.3f}  "
                       f"{(time.time() - t0) / max(step - start_step, 1):.2f}s/step", flush=True)
             step += 1
             if val_items and step % a.val_every == 0:
-                if a.tts:
+                if a.grounded:
+                    vcmp, vt, vc0, vd = evaluate_grounded(model, val_items, audio_encode, tok,
+                                                          tok.eos_token_id, a.max_audio, a.max_frames,
+                                                          max_text=a.max_text)
+                    print(f"val {step}  compr {vcmp:.3f}  text {vt:.3f}  c0 {vc0:.3f}  depth {vd:.3f}",
+                          flush=True)
+                elif a.joint:
+                    vt, vc0, vd = evaluate_joint(model, val_items, audio_encode, tok,
+                                                 tok.eos_token_id, a.max_audio, a.max_frames,
+                                                 max_text=a.max_text)
+                    print(f"val {step}  text {vt:.3f}  c0 {vc0:.3f}  depth {vd:.3f}", flush=True)
+                elif a.tts:
                     vc0, vd = evaluate_tts(model, val_items, tok, pad_id)
+                    print(f"val {step}  c0 {vc0:.3f}  depth {vd:.3f}", flush=True)
                 else:
                     vc0, vd = evaluate(model, val_items, audio_encode, tok,
                                        a.max_audio, a.max_frames, no_audio_in=a.no_audio_in, max_text=a.max_text)
-                print(f"val {step}  c0 {vc0:.3f}  depth {vd:.3f}", flush=True)
+                    print(f"val {step}  c0 {vc0:.3f}  depth {vd:.3f}", flush=True)
             if step % a.eval_every == 0 or step >= a.steps:
                 save_ckpt(step)
                 do_sample(step)

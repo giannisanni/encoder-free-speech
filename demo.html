@@ -1,0 +1,88 @@
+<!doctype html><html><head><meta charset="utf-8">
+<title>gemma-csm demo</title>
+<style>
+ body{font-family:-apple-system,system-ui,sans-serif;max-width:680px;margin:40px auto;padding:0 16px;color:#1d1d1f}
+ h1{font-size:20px} h2{font-size:15px;margin-top:28px}
+ .card{border:1px solid #e0e0e0;border-radius:12px;padding:16px;margin:14px 0}
+ textarea{width:100%;height:64px;font-size:15px;border:1px solid #ccc;border-radius:8px;padding:8px;box-sizing:border-box}
+ button{font-size:15px;padding:9px 16px;border:0;border-radius:8px;background:#0071e3;color:#fff;cursor:pointer;margin-top:8px}
+ button:disabled{background:#aaa;cursor:default}
+ #rec.recording{background:#d70015}
+ .note{color:#86868b;font-size:12.5px;line-height:1.5}
+ audio{width:100%;margin-top:10px}
+ .status{font-size:12.5px;color:#0071e3;margin-top:6px;min-height:16px}
+ .err{color:#d70015 !important}
+</style></head><body>
+<h1>gemma-csm &mdash; ckpt_20000</h1>
+
+<div class="card">
+ <h2>Make it speak (text &rarr; voice)</h2>
+ <textarea id="txt">The old house stood silent on the hill.</textarea>
+ <button id="say">Speak</button>
+ <div class="status" id="s1"></div>
+ <audio id="a1" controls></audio>
+</div>
+
+<div class="card">
+ <h2>Talk to it (mic &rarr; voice)</h2>
+ <p class="note">Wiring test: this checkpoint was trained to speak, not to respond to
+ audio, so the reply will run end-to-end but won't be a coherent answer yet.</p>
+ <button id="rec">&#127908; Record</button>
+ <div class="status" id="s2"></div>
+ <audio id="a2" controls></audio>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+
+// ---- text -> speech ----
+$('say').onclick=async()=>{
+ $('say').disabled=true;$('s1').classList.remove('err');$('s1').textContent='generating...';
+ try{
+  const fd=new FormData();fd.append('text',$('txt').value);
+  const r=await fetch('/tts',{method:'POST',body:fd});
+  const b=await r.blob();$('a1').src=URL.createObjectURL(b);$('a1').play();
+  $('s1').textContent='done ('+(r.headers.get('X-Frames')||'?')+' frames, att '+(r.headers.get('X-Attempts')||'?')+')';
+ }catch(err){$('s1').classList.add('err');$('s1').textContent='failed: '+err;}
+ $('say').disabled=false;
+};
+
+// ---- mic -> speech (click to start, click to stop) ----
+let mr=null,stream=null,chunks=[],recording=false;
+const rec=$('rec');
+rec.onclick=async()=>{
+ if(!recording){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){
+   $('s2').classList.add('err');$('s2').textContent='this browser has no mic API (needs a secure context: http://localhost or https)';return;
+  }
+  $('s2').classList.remove('err');$('s2').textContent='requesting mic permission...';
+  try{
+   stream=await navigator.mediaDevices.getUserMedia({audio:true});
+  }catch(err){
+   $('s2').classList.add('err');$('s2').textContent='mic blocked: '+(err.name||'')+' '+(err.message||err);return;
+  }
+  chunks=[];
+  mr=new MediaRecorder(stream);
+  mr.ondataavailable=e=>{if(e.data&&e.data.size)chunks.push(e.data);};
+  mr.onstop=async()=>{
+   stream.getTracks().forEach(t=>t.stop());
+   $('s2').classList.remove('err');$('s2').textContent='generating speech...';
+   const blob=new Blob(chunks,{type:mr.mimeType||'audio/webm'});
+   try{
+    const fd=new FormData();fd.append('audio',blob,'rec.webm');
+    const r=await fetch('/converse',{method:'POST',body:fd});
+    if(r.headers.get('X-Error')){$('s2').classList.add('err');$('s2').textContent='error: '+r.headers.get('X-Error');return;}
+    const b=await r.blob();$('a2').src=URL.createObjectURL(b);$('a2').play();
+    $('s2').textContent='heard '+(r.headers.get('X-InSeconds')||'?')+'s in, '+(r.headers.get('X-Frames')||'?')+' frames out';
+   }catch(err){$('s2').classList.add('err');$('s2').textContent='request failed: '+err;}
+  };
+  mr.start();
+  recording=true;rec.classList.add('recording');rec.innerHTML='&#9209;&#65039; Stop &amp; send';
+  $('s2').textContent='recording... click Stop when done';
+ }else{
+  recording=false;rec.classList.remove('recording');rec.innerHTML='&#127908; Record';
+  if(mr&&mr.state!=='inactive')mr.stop();
+ }
+};
+</script>
+</body></html>

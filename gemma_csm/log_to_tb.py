@@ -13,6 +13,12 @@ from pathlib import Path
 
 from torch.utils.tensorboard import SummaryWriter
 
+# grounded (--grounded) lines carry "compr X text Y ..."; joint (--joint) carry
+# "text X ..."; plain TTS carry neither. Try most-specific first.
+LINE_G = re.compile(r"^step (\d+)\s+compr ([\d.]+)\s+text ([\d.]+)\s+c0 ([\d.]+)\s+depth ([\d.]+)\s+([\d.]+)s/step")
+VAL_G = re.compile(r"^val (\d+)\s+compr ([\d.]+)\s+text ([\d.]+)\s+c0 ([\d.]+)\s+depth ([\d.]+)")
+LINE_J = re.compile(r"^step (\d+)\s+text ([\d.]+)\s+c0 ([\d.]+)\s+depth ([\d.]+)\s+([\d.]+)s/step")
+VAL_J = re.compile(r"^val (\d+)\s+text ([\d.]+)\s+c0 ([\d.]+)\s+depth ([\d.]+)")
 LINE = re.compile(r"^step (\d+)\s+c0 ([\d.]+)\s+depth ([\d.]+)\s+([\d.]+)s/step")
 VAL = re.compile(r"^val (\d+)\s+c0 ([\d.]+)\s+depth ([\d.]+)")
 
@@ -20,7 +26,27 @@ VAL = re.compile(r"^val (\d+)\s+c0 ([\d.]+)\s+depth ([\d.]+)")
 def feed(writer: SummaryWriter, fh, step_offset: int = 0) -> int:
     last = 0
     for line in fh:
-        m = LINE.match(line.strip())
+        line = line.strip()
+        m = LINE_G.match(line)
+        if m:
+            step = int(m.group(1)) + step_offset
+            writer.add_scalar("loss/comprehension", float(m.group(2)), step)
+            writer.add_scalar("loss/text_lm", float(m.group(3)), step)
+            writer.add_scalar("loss/c0_semantic", float(m.group(4)), step)
+            writer.add_scalar("loss/depth_acoustic", float(m.group(5)), step)
+            writer.add_scalar("perf/sec_per_step", float(m.group(6)), step)
+            last = step
+            continue
+        m = LINE_J.match(line)
+        if m:
+            step = int(m.group(1)) + step_offset
+            writer.add_scalar("loss/text_lm", float(m.group(2)), step)
+            writer.add_scalar("loss/c0_semantic", float(m.group(3)), step)
+            writer.add_scalar("loss/depth_acoustic", float(m.group(4)), step)
+            writer.add_scalar("perf/sec_per_step", float(m.group(5)), step)
+            last = step
+            continue
+        m = LINE.match(line)
         if m:
             step = int(m.group(1)) + step_offset
             writer.add_scalar("loss/c0_semantic", float(m.group(2)), step)
@@ -28,7 +54,22 @@ def feed(writer: SummaryWriter, fh, step_offset: int = 0) -> int:
             writer.add_scalar("perf/sec_per_step", float(m.group(4)), step)
             last = step
             continue
-        v = VAL.match(line.strip())
+        v = VAL_G.match(line)
+        if v:
+            step = int(v.group(1)) + step_offset
+            writer.add_scalar("val/comprehension", float(v.group(2)), step)
+            writer.add_scalar("val/text_lm", float(v.group(3)), step)
+            writer.add_scalar("val/c0_semantic", float(v.group(4)), step)
+            writer.add_scalar("val/depth_acoustic", float(v.group(5)), step)
+            continue
+        v = VAL_J.match(line)
+        if v:
+            step = int(v.group(1)) + step_offset
+            writer.add_scalar("val/text_lm", float(v.group(2)), step)
+            writer.add_scalar("val/c0_semantic", float(v.group(3)), step)
+            writer.add_scalar("val/depth_acoustic", float(v.group(4)), step)
+            continue
+        v = VAL.match(line)
         if v:
             step = int(v.group(1)) + step_offset
             writer.add_scalar("val/c0_semantic", float(v.group(2)), step)
