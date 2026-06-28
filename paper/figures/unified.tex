@@ -1,0 +1,54 @@
+\documentclass[border=5pt]{standalone}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc}
+
+\begin{document}
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={rectangle, rounded corners=2pt, draw=black!55, align=center,
+              inner sep=5pt, minimum height=10mm},
+  frozen/.style={box, fill=gray!12},
+  trained/.style={box, fill=cyan!16, draw=cyan!55!black},
+  io/.style={box, fill=orange!18, draw=orange!65!black, minimum height=10mm},
+  txt/.style={box, fill=white, draw=black!40, font=\scriptsize},
+  arr/.style={-{Stealth[length=2.4mm]}, semithick},
+  hid/.style={-{Stealth[length=2.6mm]}, thick, draw=cyan!55!black},
+]
+
+% ---- main left-to-right path ----
+\node[io] (q) {Spoken query\\16\,kHz};
+\node[frozen, right=11mm of q] (bb) {FROZEN Gemma-4 12B\\native multimodal forward\\(audio soft-tokens)\\{\footnotesize$+$ QLoRA}};
+\node[trained, right=22mm of bb] (head) {CSM speech head\\$c_0$ $+$ depth (Mimi)};
+\node[frozen, right=10mm of head] (mdec) {Mimi decoder\\(frozen)};
+\node[io, right=9mm of mdec] (out) {Spoken\\reply};
+
+% inner monologue (a by-product; the head rides the latent, not this text)
+\node[txt, below=9mm of $(bb)!0.55!(head)$] (mono) {reply text\\(inner monologue)};
+
+\draw[arr] (q) -- (bb);
+\draw[hid] (bb) -- node[above,font=\scriptsize,align=center,text=cyan!45!black]
+      {latent reply\\hidden states $h_t$} (head);
+\draw[arr] (head) -- node[above,font=\scriptsize]{$c_0\!\dots\!c_{31}$} (mdec);
+\draw[arr] (mdec) -- (out);
+\draw[arr, draw=black!35] (bb.south) |- (mono.west);
+\draw[arr, draw=black!35, densely dotted] (mono.east) -| (head.south);
+
+% ---- single-pass frame ----
+\begin{scope}[on background layer]
+  \node[rectangle, rounded corners=4pt, draw=black!35, densely dashed, inner sep=11pt,
+        fit=(q)(bb)(head)(mdec)(out)(mono),
+        label={[font=\scriptsize\bfseries]above:Single model, one forward pass, no text bottleneck}] {};
+\end{scope}
+
+% ---- note ----
+\node[font=\scriptsize, align=center, below=8mm of mono] (note)
+  {The frozen backbone reasons in latent space; the head voices its hidden states
+   \emph{directly} (Thinker$\to$Talker), so prosody can survive into the reply.\\
+   Only the head $+$ QLoRA train, but the QLoRA that wires the head also perturbs
+   the backbone's reasoning out-of-distribution (disabling it restores correct replies).};
+
+\end{tikzpicture}
+\end{document}

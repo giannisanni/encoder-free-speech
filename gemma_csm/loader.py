@@ -179,11 +179,17 @@ def load_gemma_csm_audio_in(cfg: GemmaCSMConfig, device: str = "cuda"):
 
     # the text decoder (LoRA target); audio tower stays frozen
     backbone = _extract_text_model(full)
-    if cfg.lora_all_linear:
+    cov = getattr(cfg, "lora_coverage", "") or ("all" if cfg.lora_all_linear else "attn")
+    if cov == "all":
         targets = (r"layers\.\d+\.(self_attn\.(q|k|v|o)_proj"
                    r"|mlp\.(gate|up|down)_proj)(\.linear)?$")
-    else:
+    elif cov == "attn_down":   # lighter: attn + MLP down_proj only (less trunk perturbation)
+        targets = (r"layers\.\d+\.(self_attn\.(q|k|v|o)_proj"
+                   r"|mlp\.down_proj)(\.linear)?$")
+    else:                      # attn-only (q,k,v,o)
         targets = r"layers\.\d+\.self_attn\.(q|k|v|o)_proj(\.linear)?$"
+    print(f"LoRA coverage={cov} r={cfg.lora_r} alpha={cfg.lora_alpha} "
+          f"(scaling {cfg.lora_alpha / cfg.lora_r:.3g})", flush=True)
     lora = LoraConfig(
         r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
         target_modules=targets,
@@ -197,6 +203,21 @@ def load_gemma_csm_audio_in(cfg: GemmaCSMConfig, device: str = "cuda"):
     model.audio_embs.to(device, torch.bfloat16)
     model.c0_head.to(device, torch.bfloat16)
     model.depth.to(device, torch.bfloat16)
+    # Expose the FULL multimodal model for NATIVE audio delivery (forward_unified).
+    # LoRA was injected in-place into full.language_model, so full(input_ids=..,
+    # input_features=..) runs the LoRA-adapted text decoder through the real
+    # multimodal integration (masked_scatter + token-type/modality attention) --
+    # the path proven (scripts/exp_native_delivery) to carry lexical content, which
+    # the hand-built splice into the extracted decoder does NOT. backbone (the same
+    # underlying language_model, peft-wrapped) is reused for the audio-OUT frames
+    # via KV continuation. audio_token_id identifies the <audio> placeholders.
+    # Store via __dict__ to BYPASS nn.Module.__setattr__ submodule registration:
+    # `self.full_model` shares weights with `backbone` (LoRA is injected in-place)
+    # but registering it would make model.state_dict() save the whole 12B again
+    # (observed: 9.6 GB checkpoints) and break resume. As a plain attribute it is
+    # still reachable as self.full_model but excluded from state_dict/.parameters().
+    model.__dict__["full_model"] = full
+    model.audio_token_id = int(getattr(mm.config, "audio_token_id", 258881))
 
     @torch.no_grad()
     def audio_encode(input_features, input_features_mask=None):

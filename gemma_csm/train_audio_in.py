@@ -91,6 +91,23 @@ def evaluate_joint(model, val_items, audio_encode, tok, eos_id, max_audio, max_f
     return sum(txt) / n, sum(c0s) / n, sum(dps) / n
 
 
+def evaluate_unified(model, val_items, audio_encode, tok, eos_id, max_audio, max_frames,
+                     max_n=48, max_text=96):
+    """Teacher-forced held-out text/c0/depth for --unified (native-delivery joint).
+    Same sentinel role as evaluate_joint; the real gate is a free-running decode."""
+    model.eval()
+    txt, c0s, dps = [], [], []
+    for it in val_items[:max_n]:
+        b = collate_opens2s([it], tok, max_audio, max_frames, max_text)
+        b = {k: (v.cuda() if torch.is_tensor(v) else v) for k, v in b.items()}
+        # native delivery: forward_unified reads raw input_features (no pre-splice)
+        out = model.forward_unified(b, eos_id)
+        txt.append(float(out["loss_text"])); c0s.append(float(out["loss_c0"])); dps.append(float(out["loss_depth"]))
+    model.train()
+    n = len(c0s) or 1
+    return sum(txt) / n, sum(c0s) / n, sum(dps) / n
+
+
 def evaluate_grounded(model, val_items, audio_encode, tok, eos_id, max_audio, max_frames,
                       max_n=48, max_text=96):
     """Teacher-forced held-out comprehension/text/c0/depth for --grounded. The real
@@ -144,6 +161,8 @@ def main():
     p.add_argument("--lora-r", type=int, default=32)
     p.add_argument("--lora-alpha", type=int, default=16)
     p.add_argument("--lora-all-linear", action="store_true")
+    p.add_argument("--lora-coverage", default="", choices=["", "attn", "attn_down", "all"],
+                   help="unified loader coverage tier (overrides --lora-all-linear when set)")
     p.add_argument("--max-audio", type=int, default=64)
     p.add_argument("--max-frames", type=int, default=150)
     p.add_argument("--max-text", type=int, default=96)
@@ -172,6 +191,10 @@ def main():
                         "reply-audio]; model TRANSCRIBES then replies then speaks. Requires audio-in.")
     p.add_argument("--comprehension-weight", type=float, default=1.0,
                    help="weight on the query-transcript (comprehension) LM loss in --grounded mode")
+    p.add_argument("--unified", action="store_true",
+                   help="native-delivery joint S2S: query audio wrapped in the real chat-template "
+                        "framing (carries CONTENT, not just prosody) | response-text | response-audio. "
+                        "Reuses --text-weight. Requires audio-in.")
     p.add_argument("--sample-every", type=int, default=0,
                    help="every N steps decode a few clips in-process (0=off)")
     p.add_argument("--sample-clips", type=int, default=3)
@@ -182,14 +205,29 @@ def main():
     cfg.backbone_id = a.backbone_id
     cfg.lora_r, cfg.lora_alpha = a.lora_r, a.lora_alpha
     cfg.lora_all_linear = a.lora_all_linear
+    cfg.lora_coverage = a.lora_coverage
     cfg.depth_loss_frame_frac = a.depth_frac
     cfg.depth_loss_weight = a.depth_weight
     cfg.text_loss_weight = a.text_weight
     cfg.comprehension_loss_weight = a.comprehension_weight
-    if (a.joint or a.grounded) and (a.tts or a.no_audio_in):
+    if (a.joint or a.grounded or a.unified) and (a.tts or a.no_audio_in):
         raise SystemExit("--joint/--grounded need audio-in: do not pass --tts/--no-audio-in")
 
     model, tok, audio_encode = load_gemma_csm_audio_in(cfg)
+
+    if a.unified:
+        # Native delivery (forward_unified) runs the FULL model with use_cache=True
+        # (seg1) then hands the KV to the backbone (seg2). Gradient checkpointing
+        # forces use_cache=False, so it must be OFF. Memory budget: 13.4 GB at
+        # batch 1 (validated) -> force batch 1; use --grad-accum for effective batch.
+        for m in (getattr(model, "full_model", None), model.backbone):
+            try:
+                m.gradient_checkpointing_disable()
+            except Exception as e:
+                print("gc disable note:", e, flush=True)
+        if a.batch_size != 1:
+            print(f"--unified forces batch-size 1 (was {a.batch_size}); use --grad-accum", flush=True)
+            a.batch_size = 1
 
     start_step = 0
     resume_opt = None
@@ -301,7 +339,9 @@ def main():
         for batch in dl:
             batch = {k: (v.cuda() if torch.is_tensor(v) else v)
                      for k, v in batch.items()}
-            if not a.no_audio_in:
+            if not a.no_audio_in and not a.unified:
+                # --unified delivers audio NATIVELY inside forward_unified (full
+                # model + input_features); it must NOT receive a pre-encoded splice.
                 batch["audio_in_embeds"] = audio_encode(
                     batch["input_features"].to(torch.bfloat16),
                     batch["input_features_mask"])
@@ -310,6 +350,8 @@ def main():
                 out = model.forward_grounded(batch, tok.eos_token_id, tok.bos_token_id)
             elif a.joint:
                 out = model.forward_joint(batch, tok.eos_token_id, tok.bos_token_id)
+            elif a.unified:
+                out = model.forward_unified(batch, tok.eos_token_id)
             else:
                 out = model(batch)
             if not torch.isfinite(out["loss"]):
@@ -365,6 +407,11 @@ def main():
                     vt, vc0, vd = evaluate_joint(model, val_items, audio_encode, tok,
                                                  tok.eos_token_id, a.max_audio, a.max_frames,
                                                  max_text=a.max_text)
+                    print(f"val {step}  text {vt:.3f}  c0 {vc0:.3f}  depth {vd:.3f}", flush=True)
+                elif a.unified:
+                    vt, vc0, vd = evaluate_unified(model, val_items, audio_encode, tok,
+                                                   tok.eos_token_id, a.max_audio, a.max_frames,
+                                                   max_text=a.max_text)
                     print(f"val {step}  text {vt:.3f}  c0 {vc0:.3f}  depth {vd:.3f}", flush=True)
                 elif a.tts:
                     vc0, vd = evaluate_tts(model, val_items, tok, pad_id)

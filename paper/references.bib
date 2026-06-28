@@ -166,3 +166,27 @@
   year      = {2025},
   note      = {arXiv:2409.06666}
 }
+
+@inproceedings{wang2024freezeomni,
+  title     = {Freeze-Omni: A Smart and Low Latency Speech-to-Speech Dialogue Model with Frozen LLM},
+  author    = {Wang, Xiong and Li, Yangze and Fu, Chaoyou and Shen, Yunhang and Xie, Lei and Li, Ke and Sun, Xing and Ma, Long},
+  booktitle = {International Conference on Machine Learning (ICML)},
+  year      = {2025},
+  note      = {arXiv:2411.00774. Frozen LLM; streaming speech encoder + adapter on input; AR single-codebook speech decoder driven by the LLM output; freezing avoids catastrophic forgetting under limited data.}
+}
+
+@article{xu2025qwen25omni,
+  title   = {Qwen2.5-Omni Technical Report},
+  author  = {Xu, Jin and Guo, Zhifang and He, Jinzheng and Hu, Hangrui and He, Ting and Bai, Shuai and others},
+  journal = {arXiv preprint arXiv:2503.20215},
+  year    = {2025},
+  note    = {Thinker-Talker: the Talker ``directly utilizes the hidden representations from the Thinker to produce audio tokens,'' trained end-to-end (backbone not frozen).}
+}
+
+@article{zhao2025mossspeech,
+  title   = {MOSS-Speech: Towards True Speech-to-Speech Models Without Text Guidance},
+  author  = {Zhao, Xiaoran and Wang, Ben and others},
+  journal = {arXiv preprint arXiv:2510.00499},
+  year    = {2025},
+  note    = {Qwen3-8B, 36 layers; first 32 shared trunk, last 4 split into parallel text/speech 4-layer stacks (modality-based layer-splitting). Stage 1 freezes the backbone and trains only speech embeddings, speech layers, and speech head; stage 2 unfreezes. Text-free S2S; single-codebook 12.5 Hz tokenizer (ASR-objective) + flow-matching decoder.}
+}

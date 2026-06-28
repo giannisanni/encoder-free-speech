@@ -1,0 +1,59 @@
+\documentclass[border=5pt]{standalone}
+\usepackage{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{tikz}
+\usepackage{amsmath}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,calc}
+
+\begin{document}
+\begin{tikzpicture}[
+  font=\small,
+  box/.style={rectangle, rounded corners=2pt, draw=black!55, align=center,
+              inner sep=5pt, minimum height=11mm},
+  off/.style={box, fill=gray!10, draw=black!45},
+  on/.style={box, fill=cyan!16, draw=cyan!55!black},
+  io/.style={box, fill=orange!18, draw=orange!65!black},
+  txt/.style={box, fill=white, draw=black!40, font=\scriptsize},
+  arr/.style={-{Stealth[length=2.4mm]}, semithick},
+  hid/.style={-{Stealth[length=2.6mm]}, thick, draw=cyan!55!black},
+]
+
+% ---- THINK pass (adapter OFF) ----
+\node[io] (q) {Spoken query\\16\,kHz};
+\node[off, right=10mm of q] (think) {FROZEN Gemma-4 12B\\\textbf{adapter OFF}\\(pristine reasoning)};
+\node[txt, right=12mm of think] (reply) {correct reply text\\``Congratulations on\\your promotion!''};
+
+\draw[arr] (q) -- (think);
+\draw[arr] (think) -- node[above,font=\scriptsize]{decide} (reply);
+
+% ---- VOICE pass (adapter ON), teacher-forced on the chosen reply ----
+\node[on, below=16mm of think] (voice) {FROZEN Gemma-4 12B\\\textbf{adapter ON}\\(head's training\\distribution)};
+\node[io, right=16mm of voice] (csm) {CSM head $+$ Mimi};
+\node[io, right=10mm of csm] (out) {Spoken\\reply};
+
+\draw[arr] (q.south) |- (voice.west);
+% teacher-force: drop from the reply text, enter the voice block from the top
+\draw[arr, densely dotted, draw=black!55] (reply.south) |- (voice.north);
+\node[font=\scriptsize, text=black!50, align=center] (tf)
+  at ($(voice.north)+(0,3.0mm)$) {teacher-force\\the chosen reply};
+\draw[hid] (voice) -- node[above,font=\scriptsize,text=cyan!45!black]{$h_t$} (csm);
+\draw[arr] (csm) -- (out);
+
+% ---- frames ----
+\begin{scope}[on background layer]
+  \node[rectangle, rounded corners=4pt, draw=black!30, densely dashed, inner sep=9pt,
+        fit=(q)(think)(reply),
+        label={[font=\scriptsize\bfseries]above:THINK: adapter off, correct content}] {};
+  \node[rectangle, rounded corners=4pt, draw=cyan!45!black, densely dashed, inner sep=9pt,
+        fit=(voice)(csm)(out),
+        label={[font=\scriptsize\bfseries,text=cyan!40!black]below:VOICE: adapter on, intelligible delivery}] {};
+\end{scope}
+
+\node[font=\scriptsize, align=center, below=12mm of csm] (note)
+  {Split the single forward by its sub-passes. The pristine backbone (adapter off) chooses
+   the words; the head voices that reply with the adapter on, on its training manifold.\\
+   No retraining: WER $0.94$--$1.00$ (pure ablated) $\rightarrow$ $0.22$--$0.59$ (hybrid),
+   best where the correct reply is closest to the head's content.};
+
+\end{tikzpicture}
+\end{document}

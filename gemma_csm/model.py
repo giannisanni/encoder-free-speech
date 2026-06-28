@@ -336,6 +336,92 @@ class GemmaCSM(nn.Module):
         return {"loss": loss, "loss_text": loss_text,
                 "loss_c0": loss_c0, "loss_depth": loss_depth}
 
+    # Gemma-4 Unified chat-template framing around the audio-in (extracted from the
+    # processor): prefix = "<bos><|turn>user\n<|audio>";  suffix =
+    # "<audio|><turn|>\n<|turn>model\n<|channel>thought<channel|>". Wrapping the
+    # spliced audio in this native framing is what makes it convey lexical CONTENT
+    # (not just prosody) -- see paper sec:delivery. Position 0 is BOS (attention sink).
+    _UNI_PREFIX = (2, 105, 2364, 107, 256000)
+    _UNI_SUFFIX = (258883, 106, 107, 105, 4368, 107, 100, 45518, 107, 101)
+
+    def forward_unified(self, batch, eos_id: int):
+        """Native-delivery joint S2S (segment-split). Per item:
+          seg1 (FULL multimodal model): input_ids = [<bos>user\\n<audio> | <audio>*N
+               | <audio>..model thought | reply_text | <eos>] delivered WITH
+               input_features, so the backbone's own multimodal integration
+               (masked_scatter + modality attention) carries lexical CONTENT -- the
+               proven path (scripts/exp_native_delivery). Text LM loss on the reply
+               positions teaches the model to DECIDE the reply from the audio.
+          seg2 (backbone + KV from seg1): reply-audio frames -> c0/depth, so the
+               speech head conditions on hidden states computed from the native
+               audio context (Qwen Thinker->Talker), not a re-encoded text string.
+        Loss geometry is identical to the old splice version; only delivery changed.
+        Batch handled by looping (per-item audio length); use grad-accum for an
+        effective batch. REQUIRES gradient checkpointing OFF (seg1 needs use_cache).
+        Position 0 is <bos> (attention sink), never audio.
+        """
+        assert hasattr(self, "full_model"), \
+            "forward_unified needs the full multimodal model (loader must set model.full_model)"
+        dev = self.c0_head.weight.device
+        dt = self.c0_head.weight.dtype
+        atok = self.audio_token_id
+        pre, suf = list(self._UNI_PREFIX), list(self._UNI_SUFFIX)
+        P, S = len(pre), len(suf)
+        feats_all = batch["input_features"].to(dev, dt)            # (B, Ta, 640) raw query feats
+        fmask = batch["input_features_mask"].to(dev)               # (B, Ta)
+        B = batch["text_ids"].shape[0]
+        L = batch["text_mask"].sum(1)
+        Fr = batch["frame_mask"].sum(1) - 1
+
+        text_pred_h, text_tgts = [], []
+        pred_hs, c0_tgts, depth_hs, depth_codes = [], [], [], []
+        for i in range(B):
+            li, fi, na = int(L[i]), int(Fr[i]), int(fmask[i].sum())
+            reply = batch["text_ids"][i, :li].tolist()
+            ids = pre + [atok] * na + suf + reply + [eos_id]
+            ids_t = batch["text_ids"].new_tensor([ids])
+            out1 = self.full_model(
+                input_ids=ids_t,
+                input_features=feats_all[i, :na].unsqueeze(0),
+                input_features_mask=torch.ones(1, na, dtype=torch.bool, device=dev),
+                output_hidden_states=True, use_cache=True)
+            H1 = out1.hidden_states[-1][0]                         # (Lpre, d); eos = H1[-1]
+            ts = P + na + S                                        # reply_text start index
+            if li > 0:                                            # text LM loss: predict reply + eos
+                text_pred_h.append(H1[ts - 1: ts + li])
+                text_tgts.append(torch.cat([batch["text_ids"][i, :li],
+                                            batch["text_ids"].new_tensor([eos_id])]))
+            if fi > 0:                                            # seg2: frames via backbone + KV
+                frame_e = self._embed_frames(batch["codes"][i, :, :fi].unsqueeze(0)).to(dt)
+                H2 = self.backbone(inputs_embeds=frame_e, past_key_values=out1.past_key_values,
+                                   output_hidden_states=True, use_cache=False).hidden_states[-1][0]
+                ph = torch.cat([H1[-1:].to(dt), H2], dim=0)        # (fi+1, d): eos + frames 0..fi-1
+            else:
+                ph = H1[-1:].to(dt)
+            pred_hs.append(ph)                                    # predict frames 0..fi-1 + c0_eos
+            c0_tgts.append(torch.cat([batch["codes"][i, 0, :fi],
+                                      batch["codes"].new_tensor([self.cfg.c0_eos_id])]))
+            if fi > 0:
+                depth_hs.append(ph[:fi])                          # states predicting frames 0..fi-1
+                depth_codes.append(batch["codes"][i, :, :fi].T)
+
+        w_text = getattr(self.cfg, "text_loss_weight", 1.0)
+        loss_text = self.c0_head.weight.new_zeros(())
+        if w_text > 0 and text_pred_h:
+            loss_text = F.cross_entropy(
+                self._text_logits(torch.cat(text_pred_h)).float(), torch.cat(text_tgts))
+        loss_c0 = F.cross_entropy(self.c0_head(torch.cat(pred_hs)).float(), torch.cat(c0_tgts))
+        if depth_hs:
+            all_h = torch.cat(depth_hs); all_codes = torch.cat(depth_codes)
+            n_keep = max(1, int(len(all_h) * self.cfg.depth_loss_frame_frac))
+            sel = torch.randperm(len(all_h))[:n_keep]
+            loss_depth = self.depth.loss(all_h[sel], all_codes[sel])
+        else:
+            loss_depth = loss_c0.new_zeros(())
+        loss = w_text * loss_text + loss_c0 + self.cfg.depth_loss_weight * loss_depth
+        return {"loss": loss, "loss_text": loss_text,
+                "loss_c0": loss_c0, "loss_depth": loss_depth}
+
     def forward_grounded(self, batch, eos_id: int, bos_id: int):
         """Grounded inner monologue. Geometry per item:
             [BOS | query-audio | query_text | <eos> | response_text | <eos> | response_audio]
@@ -539,6 +625,84 @@ class GemmaCSM(nn.Module):
             if c0.item() == self.cfg.c0_eos_id:
                 break
             frame = self.depth.generate(h, c0)                    # (1, 32)
+            frames.append(frame[0])
+            nxt = self._embed_frames(frame.unsqueeze(-1))
+            out = self.backbone(inputs_embeds=nxt, past_key_values=past,
+                                use_cache=True, output_hidden_states=True)
+            past = out.past_key_values
+            h = out.hidden_states[-1][:, -1]
+        codes = torch.stack(frames, dim=1) if frames else torch.zeros(32, 1, dtype=torch.long)
+        return text_str, codes
+
+    @torch.no_grad()
+    def generate_unified(self, input_features, tok, eos_id, input_features_mask=None,
+                         max_text: int = 96, max_frames: int = 400,
+                         temperature: float = 0.9, top_k: int = 50,
+                         text_temperature: float = 0.7, min_frames: int = 0,
+                         force_text_ids=None):
+        """Inference for --unified (NATIVE delivery): deliver the query audio through
+        the FULL multimodal model (input_ids with <audio> placeholders +
+        input_features -> the model's own masked_scatter, proven to carry content)
+        -> GENERATE response text (until <eos>) -> GENERATE response audio via the
+        head. Mirrors forward_unified's seg1->seg2; the text/audio loops below are
+        unchanged (KV-cache on self.backbone, the same underlying language_model)."""
+        assert hasattr(self, "full_model"), "generate_unified needs model.full_model (native delivery)"
+        dev = self.c0_head.weight.device; dt = self.c0_head.weight.dtype
+        feats = input_features.to(dev, dt)
+        if feats.dim() == 2:
+            feats = feats.unsqueeze(0)
+        na = feats.shape[1] if input_features_mask is None else int(input_features_mask.sum())
+        feats = feats[:, :na]
+        ids = list(self._UNI_PREFIX) + [self.audio_token_id] * na + list(self._UNI_SUFFIX)
+        out = self.full_model(
+            input_ids=torch.tensor([ids], device=dev), input_features=feats,
+            input_features_mask=torch.ones(1, na, dtype=torch.bool, device=dev),
+            use_cache=True, output_hidden_states=True)
+        past = out.past_key_values
+        h = out.hidden_states[-1][:, -1]                          # predicts response text token 0
+
+        if force_text_ids is None:
+            text_ids = []
+            for _ in range(max_text):
+                logits = self._text_logits(h).float() / max(text_temperature, 1e-5)
+                nid = int(torch.multinomial(F.softmax(logits, -1), 1)) if text_temperature > 0 \
+                    else int(logits.argmax(-1))
+                emb = self._embed_text(torch.tensor([[nid]], device=h.device))
+                out = self.backbone(inputs_embeds=emb, past_key_values=past,
+                                    use_cache=True, output_hidden_states=True)
+                past = out.past_key_values
+                h = out.hidden_states[-1][:, -1]
+                if nid == eos_id:
+                    break
+                text_ids.append(nid)
+            text_str = tok.decode(text_ids).strip()
+        else:
+            # Hybrid voicing: teacher-force a reply chosen elsewhere (e.g. by the
+            # pristine LoRA-off backbone), advancing the KV/h exactly as the sampling
+            # path would (reply tokens then a final <eos>) so the head's first frame
+            # sees the same post-eos hidden state it normally does. The audio loop
+            # below then voices it at whatever LoRA strength is currently set.
+            text_ids = list(force_text_ids)
+            for nid in text_ids + [eos_id]:
+                emb = self._embed_text(torch.tensor([[nid]], device=h.device))
+                out = self.backbone(inputs_embeds=emb, past_key_values=past,
+                                    use_cache=True, output_hidden_states=True)
+                past = out.past_key_values
+                h = out.hidden_states[-1][:, -1]
+            text_str = tok.decode(text_ids).strip()
+
+        frames = []
+        for _ in range(max_frames):
+            logits = self.c0_head(h).float() / temperature
+            if len(frames) < min_frames:
+                logits[..., self.cfg.c0_eos_id] = float("-inf")
+            if top_k:
+                kth = logits.topk(top_k, dim=-1).values[..., -1, None]
+                logits = logits.masked_fill(logits < kth, float("-inf"))
+            c0 = torch.multinomial(F.softmax(logits, -1), 1)[:, 0]
+            if c0.item() == self.cfg.c0_eos_id:
+                break
+            frame = self.depth.generate(h, c0)
             frames.append(frame[0])
             nxt = self._embed_frames(frame.unsqueeze(-1))
             out = self.backbone(inputs_embeds=nxt, past_key_values=past,

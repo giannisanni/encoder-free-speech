@@ -320,6 +320,145 @@ def prepare_stream_full(out_dir: Path, target: int, shard_size: int = 1000,
     print(f"done: {n_done} encoded, {n_skip} truncated (over-long capped at {max_seconds}s)", flush=True)
 
 
+def _norm_emotion(e):
+    e = (e or "none").strip().lower()
+    return "disgust" if e.startswith("disgust") else e
+
+
+def prepare_stream_balanced(out_dir: Path, total: int, per_emotion: int,
+                            max_scan: int, shard_size: int = 1000,
+                            device: str = "cpu", backbone_id: str = "google/gemma-4-12B-it",
+                            max_seconds: float = 20.0, min_words: int = 0):
+    """Emotion-BALANCED subset to widen the behavioral distribution (the unified
+    OOD template collapse comes from a Sad-skewed empathy fit). Caps each emotion
+    bucket at `per_emotion`, scanning up to `max_scan` response members in tar order
+    (Sad fills fast then is skipped, so deeper scanning rebalances toward the rest).
+
+    Bounded RAM: encode response -> Mimi codes and query -> input_features DURING the
+    stream (compact: ~KB + ~300KB per pair), never holding raw wavs (which OOM at
+    >~2k pairs). Two passes (response then query), paired by index at the end."""
+    import collections
+    from huggingface_hub import HfFileSystem, hf_hub_download
+    from transformers import AutoProcessor
+
+    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    proc = AutoProcessor.from_pretrained(backbone_id)
+    codec = MimiCodec(device=device)
+
+    mpath = hf_hub_download(REPO, "manifest_en.jsonl", repo_type="dataset")
+    meta = {}
+    with open(mpath) as fh:
+        for line in fh:
+            d = json.loads(line); meta[int(d["index"])] = d
+    print(f"manifest: {len(meta)} pairs total", flush=True)
+
+    # --- pass A: response tar (all pieces), emotion-capped, encode -> codes ---
+    counts = collections.Counter()
+    codes, emo_of = {}, {}
+    scanned = n_short = 0
+    fs = HfFileSystem()
+    print(f"pass A: scanning <= {max_scan} response wavs, cap {per_emotion}/emotion, "
+          f"target {total} ...", flush=True)
+    ch = _ChainedFile(fs, RESP_TARS)
+    tf = tarfile.open(fileobj=ch, mode="r|gz")
+    for m in tf:
+        if not m.isfile() or not m.name.endswith(".wav"):
+            continue
+        try:
+            idx = int(Path(m.name).stem)
+        except ValueError:
+            continue
+        scanned += 1
+        if scanned > max_scan or len(codes) >= total:
+            break
+        d = meta.get(idx)
+        if d is None:
+            continue
+        emo = _norm_emotion(d["query"].get("emotion") or d["response"].get("emotion"))
+        if counts[emo] >= per_emotion:
+            continue
+        if min_words and len((d["response"].get("text", "") or "").split()) < min_words:
+            n_short += 1
+            continue
+        rdata, rsr = sf.read(io.BytesIO(tf.extractfile(m).read()), dtype="float32")
+        rdata = _mono(rdata)
+        if len(rdata) > max_seconds * rsr:
+            rdata = rdata[: int(max_seconds * rsr)]
+        ev = codec.encode.__code__.co_varnames
+        c = (codec.encode(torch.from_numpy(rdata), sample_rate=rsr)
+             if "sample_rate" in ev else codec.encode(torch.from_numpy(rdata)))
+        codes[idx] = c.detach().to("cpu")
+        emo_of[idx] = emo
+        counts[emo] += 1
+        if len(codes) % 500 == 0:
+            print(f"  kept {len(codes)} (scanned {scanned}); {dict(counts)}", flush=True)
+    tf.close(); ch.close()
+    print(f"pass A done: kept {len(codes)} responses, scanned {scanned}, "
+          f"{n_short} short. emotions={dict(counts)}", flush=True)
+
+    # --- pass B: query tar, only the kept indices, encode -> input_features ---
+    want = set(codes)
+    feats = {}
+    fs = HfFileSystem()
+    print(f"pass B: matching {len(want)} query wavs ...", flush=True)
+    qf = fs.open(QUERY_TAR, "rb")
+    qtf = tarfile.open(fileobj=qf, mode="r|gz")
+    for m in qtf:
+        if not m.isfile() or not m.name.endswith(".wav"):
+            continue
+        try:
+            idx = int(Path(m.name).stem)
+        except ValueError:
+            continue
+        if idx not in want or idx in feats:
+            continue
+        qdata, qsr = sf.read(io.BytesIO(qtf.extractfile(m).read()), dtype="float32")
+        feat = proc(audio=_mono(qdata), sampling_rate=qsr, return_tensors="pt")
+        inf = None
+        for kk in ("input_features", "audio_values", "input_audio_embeds"):
+            if kk in feat:
+                inf = feat[kk]; break
+        if inf is None:
+            raise KeyError(f"no audio features; keys: {list(feat.keys())}")
+        feats[idx] = inf.squeeze(0).to(torch.float16)
+        if len(feats) % 500 == 0:
+            print(f"  matched {len(feats)}/{len(want)}", flush=True)
+        if len(feats) >= len(want):
+            break
+    qtf.close(); qf.close()
+    print(f"pass B done: matched {len(feats)} queries", flush=True)
+
+    # --- pair + shard ---
+    paired = [i for i in codes if i in feats]
+    print(f"pairing {len(paired)} complete items", flush=True)
+    items, n_shard = [], 0
+
+    def flush():
+        nonlocal items, n_shard
+        if items:
+            dst = out_dir / f"opens2s_en_{n_shard:03d}.pt"
+            tmp = out_dir / f"opens2s_en_{n_shard:03d}.pt.tmp"
+            torch.save(items, tmp); os.replace(tmp, dst)
+            print(f"wrote {dst.name} ({len(items)})", flush=True)
+            items, n_shard = [], n_shard + 1
+
+    for idx in paired:
+        d = meta[idx]
+        items.append({
+            "index": idx,
+            "input_features": feats[idx],
+            "codes": codes[idx],
+            "text": d["response"].get("text", ""),
+            "query_text": d["query"].get("text", ""),
+            "emotion": emo_of[idx],
+        })
+        if len(items) >= shard_size:
+            flush()
+    flush()
+    final = collections.Counter(emo_of[i] for i in paired)
+    print(f"BALANCED_DONE: {len(paired)} pairs. emotions={dict(final)}", flush=True)
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--stream", action="store_true",
@@ -341,8 +480,19 @@ if __name__ == "__main__":
     p.add_argument("--candidates", type=int, default=0,
                    help="stream N candidate wavs to filter from (default ~1.3x n-pairs); "
                         "set high when --min-words discards most candidates")
+    p.add_argument("--balance-emotions", action="store_true",
+                   help="emotion-BALANCED build (cap each emotion, rebalance vs Sad skew)")
+    p.add_argument("--total", type=int, default=13000, help="balanced: total pairs target")
+    p.add_argument("--per-emotion", type=int, default=1400,
+                   help="balanced: cap per emotion bucket")
+    p.add_argument("--max-scan", type=int, default=30000,
+                   help="balanced: stop after scanning this many response wavs")
     a = p.parse_args()
-    if a.full:
+    if a.balance_emotions:
+        prepare_stream_balanced(a.out, a.total, a.per_emotion, a.max_scan, a.shard_size,
+                                a.device, a.backbone_id, max_seconds=a.max_seconds,
+                                min_words=a.min_words)
+    elif a.full:
         prepare_stream_full(a.out, a.target, a.shard_size, a.device, a.backbone_id,
                             max_seconds=a.max_seconds, shard_start=a.shard_start)
     elif a.stream:

@@ -32,6 +32,13 @@ class GemmaCSMConfig:
     # variable, not rank; attention-only LoRA is the documented-failing
     # config for new-modality token generation (arXiv 2401.00246).
     lora_all_linear: bool = False
+    # Coverage tier for the unified audio-IN loader (overrides lora_all_linear
+    # when set): "attn" (q,k,v,o), "attn_down" (+ mlp.down_proj only, a lighter
+    # middle ground that keeps some MLP adaptation while perturbing the trunk
+    # less than full all-linear), or "all" (+ gate,up,down). "" = derive from
+    # lora_all_linear (back-compat). Lighter coverage masks the frozen backbone's
+    # reasoning less out-of-distribution, but too light starves speech generation.
+    lora_coverage: str = ""
 
     # training
     lr: float = 3e-4
